@@ -1,69 +1,73 @@
 # AI Product Support Chatbot
 
-This project is an attempt to build an AI chatbot that can answer questions from product documentation. The goal is to make it easier to search through long technical documents and quickly find relevant information.
+AI-powered product support chatbot using a Retrieval-Augmented Generation (RAG) architecture. The system retrieves relevant information from product documentation and uses a language model to generate context-aware responses.
 
-Instead of manually reading through large PDFs or manuals, the chatbot retrieves the most relevant sections from the documents and generates an answer based on that context.
+The goal of this project is to enable users to quickly find answers from large technical documentation without manually searching through PDFs or manuals.
 
-The system uses a Retrieval-Augmented Generation (RAG) approach.
+## Architecture
+The system follows a Retrieval-Augmented Generation pipeline:
 
-## How It Works
+User Query → Embedding → Vector Search → Retrieve Documents → LLM → Response
 
-The pipeline follows these steps:
-
-1. Load the document (PDF)
-2. Extract text from the document
-3. Split the text into smaller chunks
-4. Convert the chunks into embeddings
-5. Store the embeddings in a vector database (OpenSearch)
-6. Retrieve the most relevant chunks when a user asks a question
-7. Generate the final response using a language model
+## Pipeline Steps
+1. Load product documentation (PDF)
+2. Extract text from documents
+3. Split text into smaller chunks
+4. Convert text chunks into embeddings
+5. Store embeddings in vector database (OpenSearch)
+6. Retrieve relevant chunks based on user query
+7. Generate final response using language model
 
 ## Project Structure
 
-Ingestion  
-- document_loader.py  
-Loads and extracts text from PDF documents
+Ingestion/
+document_loader.py
 
-Processing  
-- chunking.py  
-Splits extracted text into smaller chunks
+Processing/
+chunking.py
 
-Embeddings  
-Code for generating vector embeddings (to be implemented)
+Embeddings/
+embedding generation (planned)
 
-Retrieval  
-Handles vector search and retrieving relevant chunks
+Retrieval/
+vector search and retrieval (planned)
 
-LLM  
-Responsible for generating final responses
+LLM/
+response generation (planned)
 
-App  
-Future chatbot interface
+App/
+chatbot interface (planned)
 
-test_loader.py  
-Used for testing document loading and chunking
+test_loader.py
+testing document loading and chunking
+
 
 ## Tech Stack
-
-Python  
-Sentence Transformers  
-OpenSearch  
-HuggingFace Transformers  
-Streamlit
+- Python
+- Sentence Transformers
+- HuggingFace Transformers
+- OpenSearch (Vector Database)
+- Streamlit
+- Retrieval-Augmented Generation (RAG)
 
 ## Current Progress
-
 Completed:
 - Document loader
 - Document chunking pipeline
+- Project architecture and modular structure
 
-Next Steps:
+In Progress:
 - Embedding generation
 - OpenSearch indexing
 - Retrieval pipeline
 - LLM integration
 - Chatbot interface
 
-## Goal
+## Future Improvements
+- Conversation memory
+- Web interface
+- Deployment on cloud
+- Multi-document support
 
-The goal of this project is to build a chatbot that can answer questions directly from documentation and help users quickly find the information they need.
+## Goal
+The goal of this project is to design a scalable architecture for AI-powered document question answering systems using Retrieval-Augmented Generation.
