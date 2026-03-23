@@ -71,3 +71,27 @@ In Progress:
 
 ## Goal
 The goal of this project is to design a scalable architecture for AI-powered document question answering systems using Retrieval-Augmented Generation.
+## System Architecture
+The system is designed as a modular pipeline:
+
+PDF Documents → Text Extraction → Chunking → Embeddings → Vector Database → Retriever → LLM → Response
+
+Each module is separated to allow scalability and easy integration with different models or vector databases.
+
+## How to Run the Project
+1. Clone the repository
+2. Install dependencies
+   pip install -r requirements.txt
+3. Place PDF documents inside the documents folder
+4. Run the document loader and chunking pipeline
+5. Generate embeddings and store them in OpenSearch
+6. Run the retrieval and LLM module
+7. Launch the Streamlit app (future interface)
+
+## Example Use Case
+This chatbot can be used for:
+- Product documentation search
+- Technical manuals Q&A
+- Internal company knowledge base
+- Customer support automation
+- Document-based question answering systems
