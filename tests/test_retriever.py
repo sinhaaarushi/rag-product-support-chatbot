@@ -19,6 +19,12 @@ def isolated_vector_store(monkeypatch: pytest.MonkeyPatch, tmp_path):
     monkeypatch.setattr(config, "FAISS_METADATA_FILE", vs / "metadata.json")
 
 
+def test_infer_document_type_from_prefix():
+    assert r.infer_document_type_from_name("PSS_x.pdf") == "PSS"
+    assert r.infer_document_type_from_name("FAQ_shipping.pdf") == "FAQ"
+    assert r.infer_document_type_from_name("dir/FAQ_shipping.pdf") == "FAQ"
+
+
 def test_retrieve_applies_weight_boost(isolated_vector_store, monkeypatch):
     monkeypatch.setattr(config, "TOP_K", 2)
     monkeypatch.setattr(config, "RETRIEVAL_CANDIDATES", 10)

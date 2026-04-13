@@ -40,6 +40,16 @@ def test_add_and_search_roundtrip(isolated_vector_store, monkeypatch):
     assert hits[0]["metadata"]["chunk_index"] == 2
 
 
+def test_unique_indexed_document_names(isolated_vector_store, monkeypatch):
+    monkeypatch.setattr(config, "EMBEDDING_DIMENSION", 32)
+    fs.clear_store()
+    r0 = _fake_record(0, 32)
+    r1 = {**_fake_record(1, 32), "document_name": "FAQ_other.pdf"}
+    fs.add_embeddings([r0, r1])
+    names = fs.unique_indexed_document_names()
+    assert names == ["FAQ_other.pdf", "PSS_test.pdf"]
+
+
 def test_add_rejects_wrong_dimension(isolated_vector_store, monkeypatch):
     monkeypatch.setattr(config, "EMBEDDING_DIMENSION", 8)
     fs.clear_store()
