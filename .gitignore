@@ -1,5 +1,46 @@
+# --- Python ---
 __pycache__/
-*.pyc
+.pytest_cache/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
 chatbot_env/
+
+# --- Secrets (never commit) ---
 .env
-data/*
+.env.*
+!.env.example
+
+# --- IDE / OS ---
+.idea/
+.vscode/
+*.swp
+Thumbs.db
+Desktop.ini
+
+# =============================================================================
+# Sensitive / local-only data (by design NOT in GitHub)
+# This repo tracks *code and docs*; documents and indexes stay on your machine.
+# =============================================================================
+
+# PDFs and any extracted uploads
+Data/documents/*
+!Data/documents/.gitkeep
+
+# FAISS index + chunk metadata (may contain document text)
+Data/vector_store/*
+!Data/vector_store/.gitkeep
+
+# Runtime logs (may contain operational details)
+Data/logs/
+
+# Local backups of vector store (often zip with metadata)
+Data/backups/
+
+# Optional: local model mirrors if placed inside the repo folder (prefer C:\models\ outside repo)
+models/
+*.faiss
