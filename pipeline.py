@@ -1,5 +1,5 @@
 """
-End-to-end indexing: PDF -> chunks -> embeddings -> OpenSearch.
+End-to-end indexing: PDF -> chunks -> embeddings -> FAISS.
 """
 
 from __future__ import annotations
@@ -16,6 +16,18 @@ from Utils.logging_utils import get_logger
 from VectorStore.faiss_store import add_embeddings
 
 logger = get_logger("pipeline")
+
+
+def list_pdf_files_under(folder: Path) -> list[Path]:
+    """All PDFs under folder (recursive). Case-insensitive .pdf suffix."""
+    root = folder.resolve()
+    if not root.is_dir():
+        return []
+    found: list[Path] = []
+    for path in root.rglob("*"):
+        if path.is_file() and path.suffix.lower() == ".pdf":
+            found.append(path)
+    return sorted(found, key=lambda p: str(p).lower())
 
 
 def _weight_for_type(document_type: str) -> float:
@@ -41,20 +53,21 @@ def run_indexing_pipeline(
     if path.suffix.lower() != ".pdf":
         raise ValueError("Only PDF files are supported for indexing")
 
-    doc_name = path.name
-    if not config.is_valid_doc_name(doc_name):
+    doc_key = config.document_storage_key(path)
+    if not config.is_valid_doc_name(doc_key):
         msg = (
-            f"Document name does not match convention `{config.DOC_NAME_PATTERN}`: {doc_name}"
+            f"Document name does not match convention `{config.DOC_NAME_PATTERN}`: "
+            f"{Path(doc_key).name}"
         )
         if config.ENFORCE_DOC_NAME_PATTERN:
             raise ValueError(msg)
         logger.warning(msg)
-    dtype = document_type or infer_document_type_from_name(doc_name)
+    dtype = document_type or infer_document_type_from_name(Path(doc_key).name)
     weight = _weight_for_type(dtype)
 
     text = load_pdf(path)
     if progress_callback:
-        progress_callback({"stage": "loaded_pdf", "document_name": doc_name})
+        progress_callback({"stage": "loaded_pdf", "document_name": doc_key})
     chunks = chunk_text(
         text,
         chunk_size=config.CHUNK_SIZE,
@@ -64,7 +77,7 @@ def run_indexing_pipeline(
         progress_callback({"stage": "chunked_text", "total_chunks": len(chunks)})
     if not chunks:
         return {
-            "document_name": doc_name,
+            "document_name": doc_key,
             "document_type": dtype,
             "chunks_indexed": 0,
             "message": "No text extracted; nothing indexed.",
@@ -78,7 +91,7 @@ def run_indexing_pipeline(
         body = {
             "text": chunk,
             "embedding": emb,
-            "document_name": doc_name,
+            "document_name": doc_key,
             "document_type": dtype,
             "weight": weight,
             "chunk_index": i,
@@ -96,7 +109,7 @@ def run_indexing_pipeline(
     indexed = add_embeddings(records)
 
     result = {
-        "document_name": doc_name,
+        "document_name": doc_key,
         "document_type": dtype,
         "weight": weight,
         "chunks_indexed": indexed,
@@ -106,7 +119,7 @@ def run_indexing_pipeline(
     if progress_callback:
         progress_callback({"stage": "completed", **result})
     logger.info(
-        "Indexed document=%s type=%s chunks=%s", doc_name, dtype, indexed
+        "Indexed document=%s type=%s chunks=%s", doc_key, dtype, indexed
     )
     return result
 
@@ -122,7 +135,7 @@ def run_batch_indexing_pipeline(
     if not folder.is_dir():
         raise FileNotFoundError(f"Folder not found: {folder}")
 
-    pdf_paths = sorted(p for p in folder.glob("*.pdf") if p.is_file())
+    pdf_paths = list_pdf_files_under(folder)
     total = len(pdf_paths)
     if total == 0:
         return {
@@ -137,7 +150,8 @@ def run_batch_indexing_pipeline(
     results: list[dict] = []
     total_chunks = 0
     for i, pdf_path in enumerate(pdf_paths, start=1):
-        if not config.is_valid_doc_name(pdf_path.name):
+        rel_key = config.document_storage_key(pdf_path)
+        if not config.is_valid_doc_name(rel_key):
             msg = (
                 f"Batch file name does not match convention `{config.DOC_NAME_PATTERN}`: "
                 f"{pdf_path.name}"

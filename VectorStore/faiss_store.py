@@ -123,3 +123,9 @@ def get_store_stats() -> dict[str, Any]:
         "vector_count": int(index.ntotal),
         "metadata_count": len(metadata),
     }
+
+
+def unique_indexed_document_names() -> list[str]:
+    """Distinct document_name values in metadata (order stable)."""
+    metadata = _read_metadata()
+    return sorted({str(m.get("document_name", "")) for m in metadata if m.get("document_name")})
