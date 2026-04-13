@@ -1,22 +1,38 @@
-import fitz
-import os
+"""
+Load PDF documents and return plain text using pdfplumber.
+"""
 
-def load_documents(folder_path):
-    documents = []
+from __future__ import annotations
 
-    for file in os.listdir(folder_path):
-        if file.endswith(".pdf"):
-            file_path = os.path.join(folder_path, file)
+import re
+from pathlib import Path
 
-            pdf = fitz.open(file_path)
-            text = ""
+import pdfplumber
 
-            for page in pdf:
-                text += page.get_text()
 
-            documents.append({
-                "file_name": file,
-                "text": text
-            })
+def _normalize_whitespace(text: str) -> str:
+    """Collapse excessive blank lines and trim edges."""
+    text = text.replace("\x00", " ")
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
-    return documents
+
+def load_pdf(file_path: str | Path) -> str:
+    """
+    Open a PDF, extract text from every page, and return a single clean string.
+
+    Raises FileNotFoundError if the path does not exist.
+    """
+    path = Path(file_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"PDF not found: {path}")
+
+    parts: list[str] = []
+    with pdfplumber.open(path) as pdf:
+        for page in pdf.pages:
+            page_text = page.extract_text()
+            if page_text:
+                parts.append(page_text)
+
+    return _normalize_whitespace("\n\n".join(parts))
