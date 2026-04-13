@@ -42,6 +42,7 @@ RETRIEVAL_CANDIDATES: int = int(os.getenv("RETRIEVAL_CANDIDATES", "20"))
 # --- Document weighting (applied after kNN scores; higher = more priority) ---
 DOCUMENT_WEIGHTS: dict[str, float] = {
     "PSS": float(os.getenv("WEIGHT_PSS", "1.5")),
+    "FAQ": float(os.getenv("WEIGHT_FAQ", "1.2")),
     "manual": float(os.getenv("WEIGHT_MANUAL", "1.0")),
     "guide": float(os.getenv("WEIGHT_GUIDE", "1.0")),
     "default": float(os.getenv("WEIGHT_DEFAULT", "1.0")),
@@ -71,10 +72,10 @@ MAX_QUERY_CHARS: int = int(os.getenv("MAX_QUERY_CHARS", "2000"))
 API_KEY: str = os.getenv("RAG_API_KEY", "")
 
 # --- Document naming rules ---
-# Example accepted names: PSS_motor_v1.pdf, manual_installation.pdf, guide_quickstart.pdf
+# Example accepted names: PSS_motor_v1.pdf, FAQ_returns.pdf, manual_installation.pdf
 DOC_NAME_PATTERN: str = os.getenv(
     "DOC_NAME_PATTERN",
-    r"^(PSS|manual|guide)_[A-Za-z0-9._-]+\.pdf$",
+    r"^(PSS|FAQ|manual|guide)_[A-Za-z0-9._-]+\.pdf$",
 )
 ENFORCE_DOC_NAME_PATTERN: bool = (
     os.getenv("ENFORCE_DOC_NAME_PATTERN", "false").lower() == "true"
@@ -82,4 +83,19 @@ ENFORCE_DOC_NAME_PATTERN: bool = (
 
 
 def is_valid_doc_name(file_name: str) -> bool:
-    return bool(re.match(DOC_NAME_PATTERN, file_name))
+    """Validate the PDF filename (basename), including under nested folders."""
+    basename = Path(file_name).name
+    return bool(re.match(DOC_NAME_PATTERN, basename))
+
+
+def document_storage_key(path: Path) -> str:
+    """
+    Stable document id for the index: posix path relative to DOCUMENTS_DIR when
+    possible, else the file basename. Keeps nested layouts unambiguous.
+    """
+    resolved = path.resolve()
+    root = DOCUMENTS_DIR.resolve()
+    try:
+        return resolved.relative_to(root).as_posix()
+    except ValueError:
+        return resolved.name

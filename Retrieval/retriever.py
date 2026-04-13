@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import config
@@ -24,13 +25,16 @@ class RetrievedChunk:
 
 def infer_document_type_from_name(file_name: str) -> str:
     """
-    Heuristic: filenames containing 'PSS' (case-insensitive) are treated as PSS;
-    'manual' / 'guide' in the name map to those types; otherwise 'default'.
+    Heuristic from basename: leading prefix PSS_ / FAQ_ / manual_ / guide_ (case-insensitive);
+    otherwise 'manual'/'guide' substring; else 'default'.
     """
-    upper = file_name.upper()
-    if "PSS" in upper:
+    base = Path(file_name).name
+    lower = base.lower()
+    first = lower.split("_", 1)[0] if "_" in lower else ""
+    if first == "pss":
         return "PSS"
-    lower = file_name.lower()
+    if first == "faq":
+        return "FAQ"
     if "manual" in lower:
         return "manual"
     if "guide" in lower:
