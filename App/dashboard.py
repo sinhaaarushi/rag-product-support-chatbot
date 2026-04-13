@@ -7,10 +7,12 @@ import streamlit as st
 from App.app import (
     backup_vector_store,
     diagnostics,
+    documents_sync_report,
     index_batch,
     index_document,
     preflight_check,
     query_documents,
+    rebuild_index_from_documents,
     restore_vector_store,
 )
 
@@ -36,6 +38,11 @@ with tab_health:
             st.json(diagnostics())
         except Exception as exc:
             st.error(f"Diagnostics failed: {exc}")
+    if st.button("Document / index sync (no indexing)", use_container_width=True):
+        try:
+            st.json(documents_sync_report())
+        except Exception as exc:
+            st.error(f"Sync report failed: {exc}")
     st.markdown("---")
     st.subheader("Backup / Restore Vector Store")
     if st.button("Create Backup ZIP", use_container_width=True):
@@ -55,7 +62,10 @@ with tab_health:
 with tab_index:
     st.subheader("Index Single PDF")
     file_path = st.text_input("PDF path", value="Data/documents/sample.pdf")
-    document_type = st.selectbox("Document type", ["auto", "PSS", "manual", "guide", "default"])
+    document_type = st.selectbox(
+        "Document type",
+        ["auto", "PSS", "FAQ", "manual", "guide", "default"],
+    )
 
     if st.button("Index PDF", use_container_width=True):
         try:
@@ -76,6 +86,20 @@ with tab_index:
             st.json(result)
         except Exception as exc:
             st.error(f"Batch indexing failed: {exc}")
+
+    st.markdown("---")
+    st.subheader("Rebuild index (folder = source of truth)")
+    st.caption(
+        "Clears FAISS + metadata, then re-indexes every PDF under the folder recursively. "
+        "Use after you add, remove, or rename files so the index matches disk."
+    )
+    if st.button("Rebuild index (clear + full re-index)", type="primary", use_container_width=True):
+        try:
+            result = rebuild_index_from_documents()
+            st.success("Rebuild completed")
+            st.json(result)
+        except Exception as exc:
+            st.error(f"Rebuild failed: {exc}")
 
 with tab_query:
     st.subheader("Ask Question")

@@ -11,8 +11,16 @@ from LLM.llm_response import generate_answer
 from Retrieval.retriever import chunks_to_context_dicts, retrieve_for_query
 from Utils.backup_utils import create_vector_store_backup, restore_vector_store_backup
 from Utils.logging_utils import get_logger
-from VectorStore.faiss_store import get_store_stats
-from pipeline import run_batch_indexing_pipeline, run_indexing_pipeline
+from VectorStore.faiss_store import (
+    clear_store,
+    get_store_stats,
+    unique_indexed_document_names,
+)
+from pipeline import (
+    list_pdf_files_under,
+    run_batch_indexing_pipeline,
+    run_indexing_pipeline,
+)
 
 logger = get_logger("app")
 
@@ -39,13 +47,32 @@ def _resolve_folder_path(folder_path: str | Path) -> Path:
     return p
 
 
+def documents_sync_report() -> dict:
+    """
+    Compare PDFs on disk (recursive under documents dir) to document_name keys in the index.
+    Use after add/remove/rename of files; run rebuild_index_from_documents() if drift appears.
+    """
+    docs_dir = config.DOCUMENTS_DIR.resolve()
+    on_disk = {config.document_storage_key(p) for p in list_pdf_files_under(docs_dir)}
+    in_index = set(unique_indexed_document_names())
+    return {
+        "documents_dir": str(docs_dir),
+        "pdf_count_on_disk": len(on_disk),
+        "indexed_document_count": len(in_index),
+        "only_on_disk": sorted(on_disk - in_index),
+        "only_in_index": sorted(in_index - on_disk),
+        "in_sync": on_disk == in_index,
+    }
+
+
 def diagnostics() -> dict:
     """Local diagnostics before document onboarding."""
     docs_dir = config.DOCUMENTS_DIR.resolve()
-    pdfs = sorted(docs_dir.glob("*.pdf"))
+    pdfs = list_pdf_files_under(docs_dir)
     return {
         "documents_dir": str(docs_dir),
         "pdf_files_present": len(pdfs),
+        "documents_sync": documents_sync_report(),
         "faiss_store": get_store_stats(),
         "doc_name_pattern": config.DOC_NAME_PATTERN,
         "enforce_doc_name_pattern": config.ENFORCE_DOC_NAME_PATTERN,
@@ -106,6 +133,25 @@ def index_batch(folder_path: str | Path = config.DOCUMENTS_DIR) -> dict:
     logger.info(
         "index_batch folder=%s docs=%s chunks=%s",
         folder,
+        result.get("documents_indexed"),
+        result.get("total_chunks_indexed"),
+    )
+    return result
+
+
+def rebuild_index_from_documents() -> dict:
+    """
+    Clear the vector store and index every PDF under DOCUMENTS_DIR (recursive).
+
+    Use this after adding, removing, or renaming PDFs so the index matches the folder.
+    Appends-only batch indexing does not remove stale chunks for deleted files.
+    """
+    _resolve_folder_path(config.DOCUMENTS_DIR)
+    clear_store()
+    folder = config.DOCUMENTS_DIR.resolve()
+    result = run_batch_indexing_pipeline(folder)
+    logger.info(
+        "rebuild_index_from_documents docs=%s chunks=%s",
         result.get("documents_indexed"),
         result.get("total_chunks_indexed"),
     )
