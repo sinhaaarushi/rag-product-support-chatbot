@@ -1,0 +1,10 @@
+[
+  {
+    "query": "What are the installation requirements?",
+    "role": "customer"
+  },
+  {
+    "query": "What key value points should sales highlight?",
+    "role": "sales"
+  }
+]
