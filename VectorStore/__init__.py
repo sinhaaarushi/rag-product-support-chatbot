@@ -1,0 +1,1 @@
+"""Local FAISS vector store."""
