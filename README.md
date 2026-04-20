@@ -127,9 +127,11 @@ pip install -r requirements.txt
 
 3) Download the models once (then you're offline forever)
 
-The project expects two Hugging Face models on disk — the embedding model
-(`sentence-transformers/all-MiniLM-L6-v2`, ~90 MB) and the chat model
-(`google/flan-t5-base`, ~1 GB). Fetch them with:
+The project expects three models on disk — the embedding model
+(`sentence-transformers/all-MiniLM-L6-v2`, ~90 MB), the chat model
+(`Qwen2.5-3B-Instruct`, 4-bit quantized GGUF, ~1.8 GB), and the
+cross-encoder re-ranker (`cross-encoder/ms-marco-MiniLM-L-6-v2`, ~175 MB).
+Fetch them with:
 
 ```powershell
 python scripts\download_models.py
@@ -138,13 +140,23 @@ python scripts\download_models.py
 The script is idempotent — if the files are already present it skips them,
 so it's safe to re-run. Pass `--force` to re-download.
 
+Answer generation runs through [`llama-cpp-python`](https://github.com/abetlen/llama-cpp-python)
+instead of the transformers CPU path, which is 3-4× faster on a laptop CPU
+and has a 32K-token context window (vs 512 for Flan-T5). Install the
+prebuilt wheel with:
+
+```powershell
+pip install --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu llama-cpp-python
+```
+
 4) Configure strict local/offline model paths
 
 ```powershell
 $env:LOCAL_LLM_ONLY = "true"
 $env:OFFLINE_ONLY = "true"
 $env:EMBEDDING_MODEL_LOCAL_PATH = "C:\models\all-MiniLM-L6-v2"
-$env:HF_CHAT_MODEL_LOCAL_PATH = "C:\models\flan-t5-base"
+$env:HF_CHAT_MODEL_LOCAL_PATH = "C:\models\qwen2.5-3b-instruct"
+$env:RERANKER_MODEL_LOCAL_PATH = "C:\models\ms-marco-MiniLM-L6-v2"
 ```
 
 ## Run Local Dashboard
