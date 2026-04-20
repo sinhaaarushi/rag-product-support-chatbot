@@ -54,9 +54,7 @@ def retrieve_for_query(
     4) Return top_k chunks
     """
     top_k = top_k if top_k is not None else config.TOP_K
-    candidate_pool = (
-        candidate_pool if candidate_pool is not None else config.RETRIEVAL_CANDIDATES
-    )
+    candidate_pool = candidate_pool if candidate_pool is not None else config.RETRIEVAL_CANDIDATES
     candidate_pool = max(candidate_pool, top_k)
 
     query_vector = embed_text(query)

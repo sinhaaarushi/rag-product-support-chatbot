@@ -4,8 +4,8 @@ End-to-end indexing: PDF -> chunks -> embeddings -> FAISS.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 import config
 from Embeddings.embedding_generator import embed_texts
@@ -31,9 +31,7 @@ def list_pdf_files_under(folder: Path) -> list[Path]:
 
 
 def _weight_for_type(document_type: str) -> float:
-    return config.DOCUMENT_WEIGHTS.get(
-        document_type, config.DOCUMENT_WEIGHTS["default"]
-    )
+    return config.DOCUMENT_WEIGHTS.get(document_type, config.DOCUMENT_WEIGHTS["default"])
 
 
 def run_indexing_pipeline(
@@ -87,7 +85,7 @@ def run_indexing_pipeline(
     if progress_callback:
         progress_callback({"stage": "generated_embeddings", "total_embeddings": len(embeddings)})
     records: list[dict] = []
-    for i, (chunk, emb) in enumerate(zip(chunks, embeddings)):
+    for i, (chunk, emb) in enumerate(zip(chunks, embeddings, strict=True)):
         body = {
             "text": chunk,
             "embedding": emb,
@@ -118,9 +116,7 @@ def run_indexing_pipeline(
     }
     if progress_callback:
         progress_callback({"stage": "completed", **result})
-    logger.info(
-        "Indexed document=%s type=%s chunks=%s", doc_key, dtype, indexed
-    )
+    logger.info("Indexed document=%s type=%s chunks=%s", doc_key, dtype, indexed)
     return result
 
 

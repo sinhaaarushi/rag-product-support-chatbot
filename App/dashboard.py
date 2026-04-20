@@ -16,15 +16,12 @@ from App.app import (
     restore_vector_store,
 )
 
-
 st.set_page_config(page_title="RAG Control Panel", page_icon=":mag:", layout="wide")
 st.title("RAG Control Panel (Internal)")
 st.caption("Fully local mode: no API calls, no external service endpoint required.")
 
 
-tab_health, tab_index, tab_query = st.tabs(
-    ["Diagnostics", "Index Document", "Query Documents"]
-)
+tab_health, tab_index, tab_query = st.tabs(["Diagnostics", "Index Document", "Query Documents"])
 
 with tab_health:
     st.subheader("System Diagnostics")

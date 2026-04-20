@@ -8,6 +8,11 @@ from typing import Literal
 import config
 from Embeddings.embedding_generator import embed_text
 from LLM.llm_response import generate_answer
+from pipeline import (
+    list_pdf_files_under,
+    run_batch_indexing_pipeline,
+    run_indexing_pipeline,
+)
 from Retrieval.retriever import chunks_to_context_dicts, retrieve_for_query
 from Utils.backup_utils import create_vector_store_backup, restore_vector_store_backup
 from Utils.logging_utils import get_logger
@@ -15,11 +20,6 @@ from VectorStore.faiss_store import (
     clear_store,
     get_store_stats,
     unique_indexed_document_names,
-)
-from pipeline import (
-    list_pdf_files_under,
-    run_batch_indexing_pipeline,
-    run_indexing_pipeline,
 )
 
 logger = get_logger("app")
@@ -31,9 +31,7 @@ def _resolve_path(file_path: str | Path) -> Path:
         p = (config.PROJECT_ROOT / p).resolve()
     docs_dir = config.DOCUMENTS_DIR.resolve()
     if not config.ALLOW_INDEX_OUTSIDE_DOCUMENTS_DIR and docs_dir not in p.parents:
-        raise ValueError(
-            f"File must be inside documents directory: {docs_dir}"
-        )
+        raise ValueError(f"File must be inside documents directory: {docs_dir}")
     return p
 
 
@@ -92,9 +90,7 @@ def preflight_check() -> dict:
         "embedding_runtime_ok": False,
     }
     if config.EMBEDDING_MODEL_LOCAL_PATH:
-        checks["embedding_model_path_exists"] = Path(
-            config.EMBEDDING_MODEL_LOCAL_PATH
-        ).exists()
+        checks["embedding_model_path_exists"] = Path(config.EMBEDDING_MODEL_LOCAL_PATH).exists()
     if config.HF_CHAT_MODEL_LOCAL_PATH:
         checks["chat_model_path_exists"] = Path(config.HF_CHAT_MODEL_LOCAL_PATH).exists()
     try:

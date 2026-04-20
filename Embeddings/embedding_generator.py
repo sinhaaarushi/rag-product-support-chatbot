@@ -27,9 +27,7 @@ def _get_model() -> SentenceTransformer:
                     )
                 local_path = Path(config.EMBEDDING_MODEL_LOCAL_PATH).resolve()
                 if not local_path.exists():
-                    raise FileNotFoundError(
-                        f"Embedding model path not found: {local_path}"
-                    )
+                    raise FileNotFoundError(f"Embedding model path not found: {local_path}")
                 _model = SentenceTransformer(str(local_path), local_files_only=True)
             else:
                 model_name_or_path = (

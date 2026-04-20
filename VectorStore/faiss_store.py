@@ -5,7 +5,6 @@ Local FAISS vector store with persisted metadata.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import Any
 
 import faiss
@@ -70,9 +69,7 @@ def add_embeddings(records: list[dict[str, Any]]) -> int:
 
     vectors = np.asarray([r["embedding"] for r in records], dtype="float32")
     if vectors.ndim != 2 or vectors.shape[1] != config.EMBEDDING_DIMENSION:
-        raise ValueError(
-            f"Embedding shape mismatch. Expected (*, {config.EMBEDDING_DIMENSION})."
-        )
+        raise ValueError(f"Embedding shape mismatch. Expected (*, {config.EMBEDDING_DIMENSION}).")
 
     index.add(vectors)
     for r in records:
@@ -100,7 +97,7 @@ def search(query_vector: list[float], k: int) -> list[dict[str, Any]]:
     q = np.asarray([query_vector], dtype="float32")
     scores, ids = index.search(q, k)
     results: list[dict[str, Any]] = []
-    for score, idx in zip(scores[0], ids[0]):
+    for score, idx in zip(scores[0], ids[0], strict=False):
         if idx < 0:
             continue
         if idx >= len(metadata):

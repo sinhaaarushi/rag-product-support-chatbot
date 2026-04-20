@@ -57,9 +57,7 @@ def _answer_hf_local(prompt: str) -> str:
 
     if config.OFFLINE_ONLY:
         if not config.HF_CHAT_MODEL_LOCAL_PATH:
-            raise RuntimeError(
-                "OFFLINE_ONLY is enabled but HF_CHAT_MODEL_LOCAL_PATH is not set."
-            )
+            raise RuntimeError("OFFLINE_ONLY is enabled but HF_CHAT_MODEL_LOCAL_PATH is not set.")
         model_path = Path(config.HF_CHAT_MODEL_LOCAL_PATH).resolve()
         if not model_path.exists():
             raise FileNotFoundError(f"HF chat model path not found: {model_path}")

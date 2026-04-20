@@ -77,9 +77,7 @@ DOC_NAME_PATTERN: str = os.getenv(
     "DOC_NAME_PATTERN",
     r"^(PSS|FAQ|manual|guide)_[A-Za-z0-9._-]+\.pdf$",
 )
-ENFORCE_DOC_NAME_PATTERN: bool = (
-    os.getenv("ENFORCE_DOC_NAME_PATTERN", "false").lower() == "true"
-)
+ENFORCE_DOC_NAME_PATTERN: bool = os.getenv("ENFORCE_DOC_NAME_PATTERN", "false").lower() == "true"
 
 
 def is_valid_doc_name(file_name: str) -> bool:
