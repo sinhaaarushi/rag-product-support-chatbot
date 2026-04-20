@@ -154,6 +154,19 @@ def rebuild_index_from_documents() -> dict:
     return result
 
 
+def _out_of_scope_message() -> str:
+    """Polite fallback shown when retrieval can't find anything relevant.
+
+    Centralised here (not in the UI) so the server API and the dashboard
+    return the same wording, and so swapping the copy or the support email
+    is a one-line change.
+    """
+    return (
+        "I'm sorry, I can't answer that from the documentation I have access to. "
+        f"Please reach out to us at {config.SUPPORT_EMAIL} and our team will help."
+    )
+
+
 def query_documents(
     query: str,
     role: Literal["customer", "sales"] = "customer",
@@ -161,21 +174,67 @@ def query_documents(
 ) -> dict:
     """Run retrieval + LLM answer for one query and return the response payload.
 
+    Flow:
+      1. Embed + kNN retrieve top chunks.
+      2. If the best chunk's raw similarity score is below
+         ``config.MIN_RETRIEVAL_SCORE``, short-circuit with the support-contact
+         fallback -- we don't send the LLM off to hallucinate an answer from
+         unrelated context.
+      3. Otherwise build the prompt from non-empty chunks and ask the local
+         seq2seq model to synthesise an answer.
+
     ``include_sources`` controls whether the retrieved chunks come back in the
     payload. Sources are useful for debugging and for UIs that want to show
-    citations, but not every caller needs them — keeping them opt-in means the
-    hot path stays lean.
+    citations, but not every caller needs them -- keeping them opt-in means
+    the hot path stays lean.
+
+    The ``out_of_scope`` flag lets the UI suppress source chips and any
+    "grounded in docs" affordances when the bot is punting.
     """
     retrieved_chunks = retrieve_for_query(query)
-    # Empty / whitespace-only chunk text would just waste tokens in the prompt
-    # without contributing grounding, so filter them before building context.
+
+    # The raw (unboosted) score is the truer signal of semantic relevance --
+    # the boosted score mixes in document-type weight, which can push an
+    # unrelated PSS chunk above the threshold just because PSS has a 1.5x
+    # weight. We want to decide "is this question in scope?" before weights.
+    top_raw_score = max((c.score for c in retrieved_chunks), default=0.0)
+
+    if not retrieved_chunks or top_raw_score < config.MIN_RETRIEVAL_SCORE:
+        logger.info(
+            "query role=%s out_of_scope=true top_score=%.3f threshold=%.3f",
+            role,
+            top_raw_score,
+            config.MIN_RETRIEVAL_SCORE,
+        )
+        response: dict = {
+            "answer": _out_of_scope_message(),
+            "role": role,
+            "llm_backend": "fallback",
+            "out_of_scope": True,
+            "top_retrieval_score": top_raw_score,
+        }
+        if include_sources:
+            response["sources"] = []
+        return response
+
     context_texts = [c.text for c in retrieved_chunks if c.text.strip()]
     answer, backend = generate_answer(query, context_texts, role=role)
 
-    response: dict = {"answer": answer, "role": role, "llm_backend": backend}
+    response = {
+        "answer": answer,
+        "role": role,
+        "llm_backend": backend,
+        "out_of_scope": False,
+        "top_retrieval_score": top_raw_score,
+    }
     if include_sources:
         response["sources"] = chunks_to_context_dicts(retrieved_chunks)
-    logger.info("query role=%s sources=%s", role, len(response.get("sources", [])))
+    logger.info(
+        "query role=%s sources=%s top_score=%.3f",
+        role,
+        len(response.get("sources", [])),
+        top_raw_score,
+    )
     return response
 
 
