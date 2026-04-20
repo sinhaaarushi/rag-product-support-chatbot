@@ -16,8 +16,10 @@ addopts = "-q"
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py310"
 src = ["."]
+exclude = [".venv", "Data", "scripts"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "W"]
+select = ["E", "F", "I", "W", "B", "UP"]
+ignore = ["E501"]  # line length is enforced by formatter, not linter
