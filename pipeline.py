@@ -9,7 +9,7 @@ from pathlib import Path
 
 import config
 from Embeddings.embedding_generator import embed_texts
-from Ingestion.document_loader import load_pdf
+from Ingestion.document_loader import load_pdf_pages
 from Processing.chunking import chunk_text
 from Retrieval.retriever import infer_document_type_from_name
 from Utils.logging_utils import get_logger
@@ -65,17 +65,26 @@ def run_indexing_pipeline(
     dtype = document_type or infer_document_type_from_name(doc_key)
     weight = _weight_for_type(dtype)
 
-    text = load_pdf(path)
+    pages = load_pdf_pages(path)
     if progress_callback:
-        progress_callback({"stage": "loaded_pdf", "document_name": doc_key})
-    chunks = chunk_text(
-        text,
-        chunk_size=config.CHUNK_SIZE,
-        overlap=config.CHUNK_OVERLAP,
-    )
+        progress_callback({"stage": "loaded_pdf", "document_name": doc_key, "pages": len(pages)})
+
+    # Chunk each page independently so every chunk carries exactly one page
+    # number. A paragraph that straddles a page break is still retrievable
+    # because the overlap from adjacent-page content is only lost at the
+    # actual break, which is rare in practice for well-laid-out PDFs.
+    page_chunks: list[tuple[int, str]] = []  # (page_number, chunk_text)
+    for page in pages:
+        for chunk_body in chunk_text(
+            page.text,
+            chunk_size=config.CHUNK_SIZE,
+            overlap=config.CHUNK_OVERLAP,
+        ):
+            page_chunks.append((page.page_number, chunk_body))
+
     if progress_callback:
-        progress_callback({"stage": "chunked_text", "total_chunks": len(chunks)})
-    if not chunks:
+        progress_callback({"stage": "chunked_text", "total_chunks": len(page_chunks)})
+    if not page_chunks:
         return {
             "document_name": doc_key,
             "document_type": dtype,
@@ -83,27 +92,33 @@ def run_indexing_pipeline(
             "message": "No text extracted; nothing indexed.",
         }
 
-    embeddings = embed_texts(chunks)
+    chunk_texts = [chunk_body for _, chunk_body in page_chunks]
+    embeddings = embed_texts(chunk_texts)
     if progress_callback:
         progress_callback({"stage": "generated_embeddings", "total_embeddings": len(embeddings)})
+
     records: list[dict] = []
-    for i, (chunk, emb) in enumerate(zip(chunks, embeddings, strict=True)):
-        body = {
-            "text": chunk,
-            "embedding": emb,
-            "document_name": doc_key,
-            "document_type": dtype,
-            "weight": weight,
-            "chunk_index": i,
-        }
-        records.append(body)
-        indexed = i + 1
-        if progress_callback and (indexed % 10 == 0 or indexed == len(chunks)):
+    for chunk_index, ((page_number, chunk_body), emb) in enumerate(
+        zip(page_chunks, embeddings, strict=True)
+    ):
+        records.append(
+            {
+                "text": chunk_body,
+                "embedding": emb,
+                "document_name": doc_key,
+                "document_type": dtype,
+                "weight": weight,
+                "chunk_index": chunk_index,
+                "page_number": page_number,
+            }
+        )
+        indexed = chunk_index + 1
+        if progress_callback and (indexed % 10 == 0 or indexed == len(page_chunks)):
             progress_callback(
                 {
                     "stage": "indexing_chunks",
                     "indexed_chunks": indexed,
-                    "total_chunks": len(chunks),
+                    "total_chunks": len(page_chunks),
                 }
             )
     indexed = add_embeddings(records)

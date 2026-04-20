@@ -13,7 +13,12 @@ from VectorStore.faiss_store import search
 
 @dataclass
 class RetrievedChunk:
-    """One chunk returned to the LLM."""
+    """One chunk returned to the LLM.
+
+    ``page_number`` is 1-indexed and matches the physical page a human would
+    see in a PDF reader. Value is 0 for records indexed before page tracking
+    was added; the UI treats 0 as "unknown page" and simply omits it.
+    """
 
     text: str
     document_name: str
@@ -21,6 +26,7 @@ class RetrievedChunk:
     weight: float
     score: float
     boosted_score: float
+    page_number: int = 0
 
 
 # Folder-name synonyms (lowercased, with common punctuation stripped).
@@ -106,6 +112,7 @@ def retrieve_for_query(
                 weight=weight,
                 score=score,
                 boosted_score=boosted,
+                page_number=int(src.get("page_number", 0)),
             )
         )
 
@@ -123,6 +130,7 @@ def chunks_to_context_dicts(chunks: list[RetrievedChunk]) -> list[dict[str, Any]
             "weight": c.weight,
             "score": c.score,
             "boosted_score": c.boosted_score,
+            "page_number": c.page_number,
         }
         for c in chunks
     ]

@@ -79,6 +79,9 @@ def add_embeddings(records: list[dict[str, Any]]) -> int:
 
     index.add(vectors)
     for record in records:
+        # page_number is optional for backward-compat: older records indexed
+        # before page tracking will not have it. Default to 0, which the UI
+        # renders as "unknown" rather than a misleading fake page.
         metadata.append(
             {
                 "text": record["text"],
@@ -86,6 +89,7 @@ def add_embeddings(records: list[dict[str, Any]]) -> int:
                 "document_type": record["document_type"],
                 "weight": float(record["weight"]),
                 "chunk_index": int(record["chunk_index"]),
+                "page_number": int(record.get("page_number", 0)),
             }
         )
 
