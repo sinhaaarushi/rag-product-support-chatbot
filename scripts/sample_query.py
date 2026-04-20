@@ -56,7 +56,7 @@ def main() -> int:
         f"retrieval done in {time.perf_counter() - retrieval_start:.1f}s ({len(retrieved)} chunks)"
     )
 
-    _log("calling LLM (first call loads ~1 GB flan-t5 weights; later calls are faster)...")
+    _log("calling LLM (first call loads the ~1 GB GGUF model; later calls are faster)...")
     llm_start = time.perf_counter()
     result = query_documents(args.query, role=args.role, include_sources=True)
     _log(f"LLM done in {time.perf_counter() - llm_start:.1f}s")
