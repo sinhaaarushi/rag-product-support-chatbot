@@ -49,6 +49,8 @@ models/
 # Personal scratch notes (kept outside the repo on the dev machine)
 My_Project_Notes/
 
-# Ad-hoc preflight output (regenerated on demand)
+# Ad-hoc preflight/rebuild output (regenerated on demand)
 smoke_out.txt
+rebuild.log
+model_download.log
 
