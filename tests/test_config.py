@@ -7,15 +7,26 @@ import re
 import config
 
 
-def test_valid_doc_names_match_pattern():
+def test_default_pattern_accepts_any_pdf():
+    """Default policy is permissive — type is inferred from the folder layout."""
     assert config.is_valid_doc_name("PSS_motor_v1.pdf") is True
-    assert config.is_valid_doc_name("FAQ_returns.pdf") is True
-    assert config.is_valid_doc_name("manual_installation.pdf") is True
-    assert config.is_valid_doc_name("guide_quickstart.pdf") is True
+    assert config.is_valid_doc_name("any_product_name.pdf") is True
+    assert config.is_valid_doc_name("Report.PDF") is True
     assert config.is_valid_doc_name("nested/PSS_motor_v1.pdf") is True
 
 
-def test_invalid_doc_names():
+def test_default_pattern_rejects_non_pdf():
+    assert config.is_valid_doc_name("notes.txt") is False
+    assert config.is_valid_doc_name("readme") is False
+
+
+def test_strict_pattern_via_override(monkeypatch):
+    monkeypatch.setattr(
+        config,
+        "DOC_NAME_PATTERN",
+        r"^(PSS|FAQ|manual|guide)_[A-Za-z0-9._-]+\.pdf$",
+    )
+    assert config.is_valid_doc_name("PSS_motor_v1.pdf") is True
     assert config.is_valid_doc_name("random.pdf") is False
     assert config.is_valid_doc_name("PSS.pdf") is False
 

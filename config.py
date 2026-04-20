@@ -72,18 +72,25 @@ MAX_QUERY_CHARS: int = int(os.getenv("MAX_QUERY_CHARS", "2000"))
 API_KEY: str = os.getenv("RAG_API_KEY", "")
 
 # --- Document naming rules ---
-# Example accepted names: PSS_motor_v1.pdf, FAQ_returns.pdf, manual_installation.pdf
-DOC_NAME_PATTERN: str = os.getenv(
-    "DOC_NAME_PATTERN",
-    r"^(PSS|FAQ|manual|guide)_[A-Za-z0-9._-]+\.pdf$",
-)
+# Default is permissive: any *.pdf is accepted. Document type is inferred from
+# the folder layout under DOCUMENTS_DIR (see Retrieval.retriever.infer_document_type_from_name),
+# not from a strict filename prefix.
+#
+# Teams that want a strict naming convention can override via env var, e.g.:
+#   DOC_NAME_PATTERN='^(PSS|FAQ|manual|guide)_[A-Za-z0-9._-]+\\.pdf$'
+#   ENFORCE_DOC_NAME_PATTERN=true
+DOC_NAME_PATTERN: str = os.getenv("DOC_NAME_PATTERN", r"^.+\.pdf$")
 ENFORCE_DOC_NAME_PATTERN: bool = os.getenv("ENFORCE_DOC_NAME_PATTERN", "false").lower() == "true"
 
 
 def is_valid_doc_name(file_name: str) -> bool:
-    """Validate the PDF filename (basename), including under nested folders."""
+    """Validate the PDF filename (basename), including under nested folders.
+
+    Match is case-insensitive on the file extension so ``Report.PDF`` is accepted
+    alongside ``Report.pdf``.
+    """
     basename = Path(file_name).name
-    return bool(re.match(DOC_NAME_PATTERN, basename))
+    return bool(re.match(DOC_NAME_PATTERN, basename, flags=re.IGNORECASE))
 
 
 def document_storage_key(path: Path) -> str:
