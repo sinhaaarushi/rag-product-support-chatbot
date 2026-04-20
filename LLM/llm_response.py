@@ -97,17 +97,19 @@ def _answer_hf_local(prompt: str) -> str:
     """Local seq2seq model for security-focused, no-external-API inference."""
     tokenizer, model = _load_chat_model()
 
-    # Flan-T5's encoder is 512 tokens; truncate at the tokenizer boundary so the
-    # model sees a valid window (character-based clipping can land mid-token).
-    inputs = tokenizer(
+    # Truncate at the tokenizer boundary (not character count) so the model
+    # sees a valid window; character-based clipping can land mid-token and
+    # confuse the encoder. Budgets are centralised in config.py so swapping
+    # in a different model doesn't require touching this file.
+    encoded_prompt = tokenizer(
         prompt,
         return_tensors="pt",
         truncation=True,
-        max_length=512,
+        max_length=config.LLM_MAX_INPUT_TOKENS,
     )
     output_ids = model.generate(
-        **inputs,
-        max_new_tokens=256,
+        **encoded_prompt,
+        max_new_tokens=config.LLM_MAX_NEW_TOKENS,
         do_sample=False,
     )
     return tokenizer.decode(output_ids[0], skip_special_tokens=True).strip()

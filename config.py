@@ -56,6 +56,14 @@ LOCAL_LLM_ONLY: bool = os.getenv("LOCAL_LLM_ONLY", "true").lower() == "true"
 # Strictly enforce offline local model loading from disk.
 OFFLINE_ONLY: bool = os.getenv("OFFLINE_ONLY", "true").lower() == "true"
 
+# Encoder input budget. Flan-T5 base tops out at 512 tokens of input; going
+# higher truncates silently and hurts grounding. Drop this if you swap in a
+# model with a smaller context.
+LLM_MAX_INPUT_TOKENS: int = int(os.getenv("LLM_MAX_INPUT_TOKENS", "512"))
+# Output budget. Larger values = more verbose answers + slower inference.
+# 256 is a good default for grounded Q&A; raise only if answers look truncated.
+LLM_MAX_NEW_TOKENS: int = int(os.getenv("LLM_MAX_NEW_TOKENS", "256"))
+
 # Default folder for uploaded PDFs (relative to project root)
 DOCUMENTS_DIR: Path = PROJECT_ROOT / "Data" / "documents"
 

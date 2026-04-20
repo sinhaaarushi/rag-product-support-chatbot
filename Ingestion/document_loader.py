@@ -19,20 +19,24 @@ def _normalize_whitespace(text: str) -> str:
 
 
 def load_pdf(file_path: str | Path) -> str:
-    """
-    Open a PDF, extract text from every page, and return a single clean string.
+    """Open a PDF, extract text from every page, and return a single clean string.
 
-    Raises FileNotFoundError if the path does not exist.
+    Pages that pdfplumber can't extract text from (scanned images without OCR,
+    form XObjects it can't recurse into, etc.) return ``None`` and are skipped
+    silently. The caller upstream can detect "extracted nothing" by checking
+    whether the returned string is empty after normalization.
+
+    Raises ``FileNotFoundError`` if the path does not exist.
     """
     path = Path(file_path)
     if not path.is_file():
         raise FileNotFoundError(f"PDF not found: {path}")
 
-    parts: list[str] = []
+    page_texts: list[str] = []
     with pdfplumber.open(path) as pdf:
         for page in pdf.pages:
             page_text = page.extract_text()
             if page_text:
-                parts.append(page_text)
+                page_texts.append(page_text)
 
-    return _normalize_whitespace("\n\n".join(parts))
+    return _normalize_whitespace("\n\n".join(page_texts))

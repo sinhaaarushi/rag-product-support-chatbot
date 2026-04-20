@@ -159,14 +159,24 @@ def query_documents(
     role: Literal["customer", "sales"] = "customer",
     include_sources: bool = False,
 ) -> dict:
-    chunks = retrieve_for_query(query)
-    texts = [c.text for c in chunks if c.text.strip()]
-    answer, backend = generate_answer(query, texts, role=role)
-    out: dict = {"answer": answer, "role": role, "llm_backend": backend}
+    """Run retrieval + LLM answer for one query and return the response payload.
+
+    ``include_sources`` controls whether the retrieved chunks come back in the
+    payload. Sources are useful for debugging and for UIs that want to show
+    citations, but not every caller needs them — keeping them opt-in means the
+    hot path stays lean.
+    """
+    retrieved_chunks = retrieve_for_query(query)
+    # Empty / whitespace-only chunk text would just waste tokens in the prompt
+    # without contributing grounding, so filter them before building context.
+    context_texts = [c.text for c in retrieved_chunks if c.text.strip()]
+    answer, backend = generate_answer(query, context_texts, role=role)
+
+    response: dict = {"answer": answer, "role": role, "llm_backend": backend}
     if include_sources:
-        out["sources"] = chunks_to_context_dicts(chunks)
-    logger.info("query role=%s sources=%s", role, len(out.get("sources", [])))
-    return out
+        response["sources"] = chunks_to_context_dicts(retrieved_chunks)
+    logger.info("query role=%s sources=%s", role, len(response.get("sources", [])))
+    return response
 
 
 def backup_vector_store() -> str:
