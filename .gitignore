@@ -18,6 +18,7 @@ chatbot_env/
 # --- IDE / OS ---
 .idea/
 .vscode/
+.cursor/
 *.swp
 Thumbs.db
 Desktop.ini
