@@ -85,11 +85,20 @@ def retrieve_for_query(
     top_k: int | None = None,
     candidate_pool: int | None = None,
 ) -> list[RetrievedChunk]:
-    """
-    1) Embed query
-    2) kNN search for a larger candidate set
-    3) Re-rank by FAISS score * stored weight (PSS boost via higher weight)
-    4) Return top_k chunks
+    """Run the full retrieval pipeline for a single user query.
+
+    Stages:
+      1. Embed the query with the same sentence-transformers model the index
+         was built with.
+      2. kNN against FAISS for a wider candidate pool (``candidate_pool``) so
+         the re-ranker has real options, not just the top-3 "obvious" hits.
+      3. Apply the stored per-document weight (PSS boost, FAQ boost, ...) so
+         preferred document types get a tie-breaker bump.
+      4. If ``USE_RERANKER`` is on, score every candidate with a cross-encoder
+         that reads (question, chunk) jointly and blend that with the
+         weighted score. This is where the biggest quality wins come from --
+         cross-encoders are far more accurate than pure kNN for relevance.
+      5. Return the top-``top_k`` chunks, ordered by the final blended score.
     """
     top_k = top_k if top_k is not None else config.TOP_K
     candidate_pool = candidate_pool if candidate_pool is not None else config.RETRIEVAL_CANDIDATES
@@ -115,6 +124,21 @@ def retrieve_for_query(
                 page_number=int(src.get("page_number", 0)),
             )
         )
+
+    if config.USE_RERANKER and ranked:
+        # Imported lazily so USE_RERANKER=false means the sentence-transformers
+        # CrossEncoder never even loads -- saves ~2 s on startup and ~80 MB RAM.
+        from Retrieval.reranker import rerank
+
+        final_scores = rerank(
+            query=query,
+            chunk_texts=[c.text for c in ranked],
+            weighted_scores=[c.boosted_score for c in ranked],
+        )
+        # Overwriting boosted_score with the blended score keeps downstream
+        # code (context_dicts serialisation, out-of-scope gate) untouched.
+        for chunk, blended in zip(ranked, final_scores, strict=True):
+            chunk.boosted_score = blended
 
     ranked.sort(key=lambda c: c.boosted_score, reverse=True)
     return ranked[:top_k]

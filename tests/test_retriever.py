@@ -66,6 +66,10 @@ def test_infer_handles_pathlib_input():
 def test_retrieve_applies_weight_boost(isolated_vector_store, monkeypatch):
     monkeypatch.setattr(config, "TOP_K", 2)
     monkeypatch.setattr(config, "RETRIEVAL_CANDIDATES", 10)
+    # Disable the cross-encoder re-ranker: this test exists specifically to
+    # verify the kNN-score * document-weight math, and the re-ranker would
+    # blend its own scores on top and mask the behaviour we care about here.
+    monkeypatch.setattr(config, "USE_RERANKER", False)
 
     def fake_search(query_vector, k):
         return [
