@@ -19,43 +19,48 @@ def isolated_vector_store(monkeypatch: pytest.MonkeyPatch, tmp_path):
     monkeypatch.setattr(config, "FAISS_METADATA_FILE", vs / "metadata.json")
 
 
-def test_infer_document_type_from_prefix():
-    assert r.infer_document_type_from_name("PSS_x.pdf") == "PSS"
-    assert r.infer_document_type_from_name("FAQ_shipping.pdf") == "FAQ"
-    assert r.infer_document_type_from_name("dir/FAQ_shipping.pdf") == "FAQ"
-
-
-def test_infer_from_folder_path_matches_pss():
+def test_infer_from_pss_folder():
     assert r.infer_document_type_from_name("PSS/motor_overview.pdf") == "PSS"
     assert r.infer_document_type_from_name("pss/anything.pdf") == "PSS"
 
 
-def test_infer_more_specific_subfolder_wins():
-    """PSS/FAQs/whatever.pdf must resolve to FAQ, not PSS."""
-    assert r.infer_document_type_from_name("PSS/FAQs/returns.pdf") == "FAQ"
+def test_infer_from_faq_folder():
+    assert r.infer_document_type_from_name("FAQ/returns.pdf") == "FAQ"
+    assert r.infer_document_type_from_name("FAQs/returns.pdf") == "FAQ"
+
+
+def test_infer_deeper_subfolder_wins():
+    """``PSS/FAQ/whatever.pdf`` must resolve to FAQ, not PSS."""
     assert r.infer_document_type_from_name("PSS/FAQ/returns.pdf") == "FAQ"
+    assert r.infer_document_type_from_name("PSS/FAQs/shipping.pdf") == "FAQ"
 
 
-def test_infer_from_full_form_synonyms_in_filename():
-    assert r.infer_document_type_from_name("MotorXYZ_ProductSpecSheet.pdf") == "PSS"
-    assert r.infer_document_type_from_name("BoilerABC_FrequentlyAskedQuestions.pdf") == "FAQ"
+def test_infer_ignores_filename_tokens():
+    """Folder is the sole source of truth — filename hints must not leak in."""
+    # The filename screams "PSS" but the file sits outside any typed folder.
+    assert r.infer_document_type_from_name("MotorXYZ_ProductSpecSheet.pdf") == "default"
+    assert r.infer_document_type_from_name("Acme-Pump-PSS-v3.pdf") == "default"
+    # And a file named "FAQ..." still gets the PSS folder's type.
+    assert r.infer_document_type_from_name("PSS/FAQs_are_here.pdf") == "PSS"
 
 
-def test_infer_token_anywhere_in_basename():
-    """The legacy heuristic only checked the leading token; now any token works."""
-    assert r.infer_document_type_from_name("Acme-Pump-PSS-v3.pdf") == "PSS"
-    assert r.infer_document_type_from_name("returns_FAQ_2024.pdf") == "FAQ"
+def test_infer_folder_match_is_case_and_punctuation_insensitive():
+    """Folder names match ignoring case, underscores, hyphens, and spaces."""
+    assert r.infer_document_type_from_name("Product Spec Sheets/x.pdf") == "PSS"
+    assert r.infer_document_type_from_name("product-spec-sheet/x.pdf") == "PSS"
+    assert r.infer_document_type_from_name("Frequently_Asked_Questions/x.pdf") == "FAQ"
 
 
 def test_infer_falls_back_to_default():
     assert r.infer_document_type_from_name("random_file.pdf") == "default"
-    assert r.infer_document_type_from_name("nested/folder/random.pdf") == "default"
+    assert r.infer_document_type_from_name("misc/notes/random.pdf") == "default"
 
 
 def test_infer_handles_pathlib_input():
     from pathlib import Path
 
     assert r.infer_document_type_from_name(Path("PSS") / "FAQs" / "returns.pdf") == "FAQ"
+    assert r.infer_document_type_from_name(Path("PSS") / "PSS" / "x.pdf") == "PSS"
 
 
 def test_retrieve_applies_weight_boost(isolated_vector_store, monkeypatch):

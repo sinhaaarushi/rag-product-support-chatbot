@@ -44,42 +44,49 @@ Pipeline:
 
 ## Loading your documents
 
-Drop PDFs anywhere under `Data/documents/`. The folder layout is what drives
-**document type** (PSS, FAQ, manual, guide), and document type drives the
-retrieval weighting in `Retrieval/retriever.py`.
+Drop PDFs under `Data/documents/`. **The folder a file lives in is the single
+source of truth for its document type** (PSS, FAQ, manual, guide) — filenames
+are never inspected. Document type then drives the retrieval weighting in
+`Retrieval/retriever.py`.
 
 ### Recommended layout
 
 ```
 Data/documents/
 ├── PSS/
-│   ├── ProductA_PSS.pdf
-│   ├── ProductB_ProductSpecSheet.pdf
-│   └── FAQs/
-│       ├── ProductA_FAQ.pdf
-│       └── ProductB_FrequentlyAskedQuestions.pdf
+│   ├── <product spec PDFs>
+│   └── FAQ/
+│       └── <FAQ PDFs>
 ├── manuals/
-│   └── installation_manual.pdf
+│   └── <manual PDFs>
 └── guides/
-    └── quickstart_guide.pdf
+    └── <guide PDFs>
 ```
+
+Nested folders are fine and encouraged — `PSS/PSS/foo.pdf` resolves to `PSS`,
+`PSS/FAQ/foo.pdf` resolves to `FAQ` (the deeper folder wins).
 
 ### How a file gets classified
 
-`infer_document_type_from_name()` resolves type using the path, most-specific
-folder first, then falling back to filename tokens:
+`infer_document_type_from_name()` walks the file's folder path from deepest
+to shallowest and returns the first recognized folder's type:
 
-| Path under `Data/documents/`            | Inferred type |
-|------------------------------------------|---------------|
-| `PSS/anything.pdf`                       | `PSS`         |
-| `PSS/FAQs/anything.pdf`                  | `FAQ` *(subfolder wins over PSS parent)* |
-| `manuals/setup.pdf`                      | `manual`      |
-| `guides/quickstart.pdf`                  | `guide`       |
-| `MotorXYZ_ProductSpecSheet.pdf`          | `PSS` *(filename token)* |
-| `BoilerABC_FrequentlyAskedQuestions.pdf` | `FAQ` *(filename token)* |
-| `random_report.pdf`                      | `default`     |
+| Path under `Data/documents/`   | Inferred type |
+|--------------------------------|---------------|
+| `PSS/anything.pdf`             | `PSS`         |
+| `PSS/PSS/anything.pdf`         | `PSS`         |
+| `PSS/FAQ/anything.pdf`         | `FAQ` *(deeper folder wins)* |
+| `manuals/setup.pdf`            | `manual`      |
+| `guides/quickstart.pdf`        | `guide`       |
+| `random_report.pdf`            | `default` *(not under any typed folder)* |
 
-Matching is case-insensitive and ignores `_`, `-`, and spaces.
+Folder-name matching is case-insensitive and ignores `_`, `-`, and spaces, so
+`PSS`, `pss`, `Product Spec Sheets`, and `product-spec-sheet` all map to `PSS`.
+Recognized folder names: `PSS` / `ProductSpecSheet`(s), `FAQ` / `FAQs` /
+`FrequentlyAskedQuestions`, `manual`(s), `guide`(s).
+
+If a document lands in `default`, the fix is to move it into a typed folder —
+not to rename it. This keeps organization explicit and easy to audit.
 
 ### Filename validation (optional)
 
@@ -118,7 +125,20 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-3) Configure strict local/offline model paths
+3) Download the models once (then you're offline forever)
+
+The project expects two Hugging Face models on disk — the embedding model
+(`sentence-transformers/all-MiniLM-L6-v2`, ~90 MB) and the chat model
+(`google/flan-t5-base`, ~1 GB). Fetch them with:
+
+```powershell
+python scripts\download_models.py
+```
+
+The script is idempotent — if the files are already present it skips them,
+so it's safe to re-run. Pass `--force` to re-download.
+
+4) Configure strict local/offline model paths
 
 ```powershell
 $env:LOCAL_LLM_ONLY = "true"

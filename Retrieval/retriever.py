@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -24,7 +23,10 @@ class RetrievedChunk:
     boosted_score: float
 
 
-# Folder-name synonyms (lowercased). Order is irrelevant — type is keyed by folder.
+# Folder-name synonyms (lowercased, with common punctuation stripped).
+# The document type comes exclusively from the folder a PDF lives under; filenames
+# are never consulted. If a file is not under any recognized folder, its type is
+# ``"default"`` — which means: move it into the right folder, don't rename it.
 _FOLDER_TYPE_MAP: dict[str, str] = {
     "faq": "FAQ",
     "faqs": "FAQ",
@@ -40,59 +42,34 @@ _FOLDER_TYPE_MAP: dict[str, str] = {
     "guides": "guide",
 }
 
-# Token synonyms for filename-based inference. Same idea as above but matched
-# against tokens in the basename (split on non-alphanumeric).
-_TOKEN_TYPE_MAP: dict[str, str] = {
-    "faq": "FAQ",
-    "faqs": "FAQ",
-    "frequentlyaskedquestions": "FAQ",
-    "pss": "PSS",
-    "productspecsheet": "PSS",
-    "productspecsheets": "PSS",
-    "productspecificationsheet": "PSS",
-    "productspecificationsheets": "PSS",
-    "manual": "manual",
-    "guide": "guide",
-}
-
-_TOKEN_SPLIT = re.compile(r"[^A-Za-z0-9]+")
-
 
 def _normalize(token: str) -> str:
     return token.lower().replace("_", "").replace("-", "").replace(" ", "")
 
 
 def infer_document_type_from_name(file_name: str | Path) -> str:
-    """Infer the document type for a PDF.
+    """Infer the document type for a PDF from its folder path.
 
-    Strategy (most specific wins):
-      1. Walk the path's folder components from deepest to shallowest. The first
-         folder whose normalized name maps to a known type (see ``_FOLDER_TYPE_MAP``)
-         decides the type. This means ``PSS/FAQs/file.pdf`` resolves to ``FAQ``,
-         not ``PSS``.
-      2. Fall back to tokens in the basename (split on non-alphanumeric chars).
-         Synonyms like ``ProductSpecSheet`` and ``FrequentlyAskedQuestions``
-         resolve to ``PSS`` and ``FAQ`` respectively.
-      3. Otherwise return ``"default"``.
+    Strategy: walk the path's folder components from deepest to shallowest and
+    return the type of the first folder that matches ``_FOLDER_TYPE_MAP``. So
+    ``PSS/FAQ/returns.pdf`` resolves to ``FAQ`` (not ``PSS``) because the deeper
+    folder wins. Filenames are never consulted — organization is the source of
+    truth, which keeps the rule predictable and forces clean folder layout.
 
-    The function accepts either a relative path (preferred — same key as stored
-    in metadata) or a bare filename. Matching is case-insensitive and ignores
-    underscores, hyphens, and spaces.
+    Accepts either a relative path (preferred — same key as stored in metadata)
+    or a bare filename. Matching is case-insensitive and ignores underscores,
+    hyphens, and spaces, so ``PSS``, ``pss``, ``Product Spec Sheets``, and
+    ``product-spec-sheets`` all map to ``PSS``.
+
+    Returns ``"default"`` when the file is not under any recognized folder.
     """
     path = Path(str(file_name))
-    parts = list(path.parts)
-    folders = parts[:-1] if len(parts) > 1 else []
+    folders = list(path.parts)[:-1]
 
     for folder in reversed(folders):
         norm = _normalize(folder)
         if norm in _FOLDER_TYPE_MAP:
             return _FOLDER_TYPE_MAP[norm]
-
-    stem = path.stem
-    tokens = [_normalize(tok) for tok in _TOKEN_SPLIT.split(stem) if tok]
-    for token in tokens:
-        if token in _TOKEN_TYPE_MAP:
-            return _TOKEN_TYPE_MAP[token]
 
     return "default"
 

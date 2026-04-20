@@ -42,7 +42,8 @@ def run_indexing_pipeline(
     """
     Load one PDF, chunk, embed batches, index each chunk with metadata.
 
-    If document_type is None, it is inferred from the filename (see retriever.infer_document_type_from_name).
+    If ``document_type`` is None, it is inferred from the file's folder path
+    relative to ``DOCUMENTS_DIR`` (see ``retriever.infer_document_type_from_name``).
     Returns a small summary dict for API responses.
     """
     path = Path(file_path).resolve()
@@ -60,7 +61,8 @@ def run_indexing_pipeline(
         if config.ENFORCE_DOC_NAME_PATTERN:
             raise ValueError(msg)
         logger.warning(msg)
-    dtype = document_type or infer_document_type_from_name(Path(doc_key).name)
+    # Pass the full relative key (folder + name) so the classifier can read folders.
+    dtype = document_type or infer_document_type_from_name(doc_key)
     weight = _weight_for_type(dtype)
 
     text = load_pdf(path)
