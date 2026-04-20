@@ -44,3 +44,6 @@ Data/backups/
 # Optional: local model mirrors if placed inside the repo folder (prefer C:\models\ outside repo)
 models/
 *.faiss
+
+# Personal scratch notes (kept outside the repo on the dev machine)
+My_Project_Notes/

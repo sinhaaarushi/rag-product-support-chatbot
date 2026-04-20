@@ -4,7 +4,7 @@
 
 - **Source code** (`App/`, `Embeddings/`, `LLM/`, `Retrieval/`, `VectorStore/`, `Processing/`, `Ingestion/`, `Utils/`, `Eval/`, `tests/`, etc.)
 - **Configuration templates** (e.g. `.env.example`, `config.py` defaults)
-- **Documentation** (`README.md`, `docs/`, `My_Project_Notes/` if you choose to track it)
+- **Documentation** (`README.md`, `docs/`)
 - **CI** (`.github/workflows/`)
 
 This shows you are **actively building** a real system without exposing customer or internal documents.
