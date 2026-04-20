@@ -20,8 +20,13 @@ addopts = "-q"
 line-length = 100
 target-version = "py310"
 src = ["."]
-exclude = [".venv", "Data", "scripts"]
+exclude = [".venv", "Data"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W", "B", "UP"]
 ignore = ["E501"]  # line length is enforced by formatter, not linter
+
+[tool.ruff.lint.per-file-ignores]
+# Standalone entry-point scripts bootstrap sys.path before importing project
+# modules, which legitimately requires imports after statements.
+"scripts/*.py" = ["E402"]

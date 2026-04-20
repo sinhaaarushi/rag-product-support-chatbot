@@ -17,8 +17,8 @@ if str(_ROOT) not in sys.path:
 
 import config
 from Ingestion.document_loader import load_pdf
-from Processing.chunking import chunk_text
 from pipeline import list_pdf_files_under
+from Processing.chunking import chunk_text
 
 
 def main() -> None:
