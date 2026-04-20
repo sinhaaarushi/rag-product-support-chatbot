@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -23,22 +24,76 @@ class RetrievedChunk:
     boosted_score: float
 
 
-def infer_document_type_from_name(file_name: str) -> str:
+# Folder-name synonyms (lowercased). Order is irrelevant — type is keyed by folder.
+_FOLDER_TYPE_MAP: dict[str, str] = {
+    "faq": "FAQ",
+    "faqs": "FAQ",
+    "frequentlyaskedquestions": "FAQ",
+    "pss": "PSS",
+    "productspecsheet": "PSS",
+    "productspecsheets": "PSS",
+    "productspecificationsheet": "PSS",
+    "productspecificationsheets": "PSS",
+    "manual": "manual",
+    "manuals": "manual",
+    "guide": "guide",
+    "guides": "guide",
+}
+
+# Token synonyms for filename-based inference. Same idea as above but matched
+# against tokens in the basename (split on non-alphanumeric).
+_TOKEN_TYPE_MAP: dict[str, str] = {
+    "faq": "FAQ",
+    "faqs": "FAQ",
+    "frequentlyaskedquestions": "FAQ",
+    "pss": "PSS",
+    "productspecsheet": "PSS",
+    "productspecsheets": "PSS",
+    "productspecificationsheet": "PSS",
+    "productspecificationsheets": "PSS",
+    "manual": "manual",
+    "guide": "guide",
+}
+
+_TOKEN_SPLIT = re.compile(r"[^A-Za-z0-9]+")
+
+
+def _normalize(token: str) -> str:
+    return token.lower().replace("_", "").replace("-", "").replace(" ", "")
+
+
+def infer_document_type_from_name(file_name: str | Path) -> str:
+    """Infer the document type for a PDF.
+
+    Strategy (most specific wins):
+      1. Walk the path's folder components from deepest to shallowest. The first
+         folder whose normalized name maps to a known type (see ``_FOLDER_TYPE_MAP``)
+         decides the type. This means ``PSS/FAQs/file.pdf`` resolves to ``FAQ``,
+         not ``PSS``.
+      2. Fall back to tokens in the basename (split on non-alphanumeric chars).
+         Synonyms like ``ProductSpecSheet`` and ``FrequentlyAskedQuestions``
+         resolve to ``PSS`` and ``FAQ`` respectively.
+      3. Otherwise return ``"default"``.
+
+    The function accepts either a relative path (preferred — same key as stored
+    in metadata) or a bare filename. Matching is case-insensitive and ignores
+    underscores, hyphens, and spaces.
     """
-    Heuristic from basename: leading prefix PSS_ / FAQ_ / manual_ / guide_ (case-insensitive);
-    otherwise 'manual'/'guide' substring; else 'default'.
-    """
-    base = Path(file_name).name
-    lower = base.lower()
-    first = lower.split("_", 1)[0] if "_" in lower else ""
-    if first == "pss":
-        return "PSS"
-    if first == "faq":
-        return "FAQ"
-    if "manual" in lower:
-        return "manual"
-    if "guide" in lower:
-        return "guide"
+    path = Path(str(file_name))
+    parts = list(path.parts)
+    folders = parts[:-1] if len(parts) > 1 else []
+
+    for folder in reversed(folders):
+        norm = _normalize(folder)
+        if norm in _FOLDER_TYPE_MAP:
+            return _FOLDER_TYPE_MAP[norm]
+
+    stem = path.stem
+    tokens = [_normalize(tok) for tok in _TOKEN_SPLIT.split(stem) if tok]
+    for token in tokens:
+        if token in _TOKEN_TYPE_MAP:
+            return _TOKEN_TYPE_MAP[token]
+
     return "default"
 
 
