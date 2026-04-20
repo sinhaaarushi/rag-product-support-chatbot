@@ -43,13 +43,24 @@ _EMBEDDING_SENTINELS = ("config.json", "modules.json", "sentence_bert_config.jso
 _CHAT_SENTINELS = ("config.json", "tokenizer.json", "spiece.model")
 
 
+def _windows_fallback(name: str) -> Path:
+    """``C:\\models\\<name>``-style fallback, safe on Windows.
+
+    ``Path("C:") / "models"`` is drive-*relative* on Windows (resolves against
+    the current directory of drive C:), so it silently writes into wherever
+    the script happens to run. Append an explicit separator to get an absolute
+    path rooted at the drive.
+    """
+    drive = os.getenv("SystemDrive", "C:")
+    return Path(drive + os.sep) / "models" / name
+
+
 def _default_target(env_value: str, fallback: Path) -> Path:
     """Resolve where a model should be written.
 
     Prefers the env-configured local path (so ``EMBEDDING_MODEL_LOCAL_PATH`` is
-    the single source of truth), and falls back to a sensible default under
-    ``C:\\models`` so the script is useful on a fresh machine even before ``.env``
-    has been set up.
+    the single source of truth), and falls back to ``C:\\models\\<name>`` so the
+    script is useful on a fresh machine even before ``.env`` has been set up.
     """
     return Path(env_value).resolve() if env_value else fallback
 
@@ -69,13 +80,18 @@ def _download(repo_id: str, target: Path, force: bool) -> None:
     snapshot_download(
         repo_id=repo_id,
         local_dir=str(target),
-        # Real files on Windows. Symlinks inside user dirs trip up venvs and
-        # antivirus software more often than they're worth.
-        local_dir_use_symlinks=False,
-        # We want everything the tokenizer / model loaders might look for.
-        # Blocking msgpack/safetensors would save a few MB but introduce
-        # surprise failures the first time someone flips a loader flag.
-        ignore_patterns=["*.onnx", "*.msgpack", "onnx/*", "openvino/*"],
+        # We serve PyTorch via transformers / sentence-transformers, so skip the
+        # flax / TF / ONNX / OpenVINO weights. This cuts flan-t5-base from ~3 GB
+        # to ~1 GB. Safetensors is kept because HF loaders prefer it when present.
+        ignore_patterns=[
+            "*.onnx",
+            "onnx/*",
+            "openvino/*",
+            "*.msgpack",
+            "flax_model.*",
+            "tf_model.*",
+            "*.h5",
+        ],
         force_download=force,
     )
 
@@ -103,11 +119,11 @@ def main() -> int:
 
     embedding_target = _default_target(
         config.EMBEDDING_MODEL_LOCAL_PATH,
-        Path(os.getenv("SystemDrive", "C:")) / "models" / "all-MiniLM-L6-v2",
+        _windows_fallback("all-MiniLM-L6-v2"),
     )
     chat_target = _default_target(
         config.HF_CHAT_MODEL_LOCAL_PATH,
-        Path(os.getenv("SystemDrive", "C:")) / "models" / "flan-t5-base",
+        _windows_fallback("flan-t5-base"),
     )
 
     plan: list[tuple[str, str, Path, tuple[str, ...]]] = []
