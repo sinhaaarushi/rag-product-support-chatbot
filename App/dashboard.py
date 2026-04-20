@@ -2,12 +2,23 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import Any
+import sys
+from pathlib import Path
 
-import streamlit as st
+# Streamlit invokes `streamlit run App/dashboard.py`, which places only this
+# file's directory on sys.path -- not the project root. Without this bootstrap,
+# `from App.app import ...` fails with ModuleNotFoundError even though the
+# same import works from any other entry point (pytest, scripts/, REPL).
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
-from App.app import (
+from collections.abc import Callable  # noqa: E402
+from typing import Any  # noqa: E402
+
+import streamlit as st  # noqa: E402
+
+from App.app import (  # noqa: E402
     backup_vector_store,
     diagnostics,
     documents_sync_report,
