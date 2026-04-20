@@ -6,3 +6,7 @@ transformers>=4.40.0,<6.0
 torch>=2.0.0,<3.0
 streamlit>=1.35.0,<2.0
 faiss-cpu>=1.8.0,<2.0
+# LLM inference via a 4-bit quantized GGUF model. Install with the CPU wheel
+# index so pip fetches a prebuilt binary instead of compiling from source:
+#   pip install --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu llama-cpp-python
+llama-cpp-python>=0.3.0,<0.4

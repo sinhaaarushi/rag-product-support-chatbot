@@ -1,5 +1,14 @@
-"""
-Generate answers from retrieved context using local Hugging Face models only.
+"""Generate answers from retrieved context using a local GGUF-quantized LLM.
+
+Why llama-cpp and not transformers: this project runs on a laptop-class CPU
+with limited RAM. Full-precision weights from ``transformers`` are 3-4x
+slower and 3-4x bigger than a Q4_K_M GGUF file with essentially the same
+answer quality. llama-cpp-python also gives us a real chat-completion API
+(role-tagged messages) instead of us hand-rolling a seq2seq prompt template.
+
+Public API: ``generate_answer(query, retrieved_texts, role)`` returns
+``(answer, backend)``. Nothing upstream of this module had to change --
+``App/app.py`` and the dashboard still work unmodified.
 """
 
 from __future__ import annotations
@@ -12,120 +21,143 @@ import config
 
 Role = Literal["customer", "sales"]
 
-# Module-level cache so the ~1 GB flan-t5 weights are loaded once per process
-# rather than on every query. Thread-safe because the Streamlit dashboard and
-# any future server will serve requests concurrently.
-_llm_tokenizer: Any | None = None
-_llm_model: Any | None = None
+# Module-level cache: loading a 1 GB GGUF and spinning up the ggml context
+# takes ~5-10 s on CPU. Doing that once per process (not once per query) is
+# what makes the dashboard feel interactive after the first question.
+_llm: Any | None = None
 _llm_lock = threading.Lock()
+
+# System prompt -- the rules the model follows on every turn. Kept separate
+# from the per-query context so it lives in one place and the chat template
+# can apply it as a proper ``system`` role message (modern instruct models
+# attend to system prompts differently from user turns).
+_SYSTEM_PROMPT = """You are a product documentation assistant.
+
+Rules (must follow):
+- Use ONLY the facts contained in the context the user provides. Never invent
+  information that is not in the context.
+- Rephrase the answer in your own words. Do NOT copy sentences, bullet lists,
+  or headings verbatim from the context -- synthesise a direct, natural reply.
+- Interpret the user's intent charitably: answer the question they clearly
+  meant, even if the wording is informal or incomplete.
+- If the context does not contain enough information to answer the question,
+  reply with one short sentence saying so. Do not pad with unrelated facts.
+- Keep answers concise: 2-5 sentences unless the user asks for detail."""
 
 
 def _role_instructions(role: Role) -> str:
+    """Return the audience-specific guidance appended to the system prompt.
+
+    Kept as a function (not a dict) so the signatures stay stable even if we
+    later want to branch on tone, reading level, etc.
+    """
     if role == "customer":
         return (
             "Audience: end customer. Use clear, concise language. "
-            "Focus on practical steps and safety. Avoid internal sales jargon."
+            "Focus on practical information and avoid internal sales jargon."
         )
     if role == "sales":
         return (
-            "Audience: sales team. You may highlight positioning, differentiation, "
-            "and customer-facing value, but still ground every claim in the context below."
+            "Audience: internal sales team. You may highlight positioning, "
+            "differentiation, and customer-facing value, but still ground "
+            "every claim in the provided context."
         )
     return "Audience: general."
 
 
-def _build_prompt(query: str, context_blocks: list[str], role: Role) -> str:
-    """Compose the final prompt sent to the seq2seq model.
+def _resolve_chat_model_path() -> Path:
+    """Locate the GGUF file on disk, honouring OFFLINE_ONLY.
 
-    Ordering matters: we put the QUESTION first and the CONTEXT last. Two reasons:
-      1. Flan-T5's encoder window is 512 tokens. If we overflow, tokenizer
-         truncation chops the *end* of the prompt. Putting context last means
-         we lose context chunks on overflow -- not the actual question, not the
-         "Answer:" trigger. That single change fixes the failure mode where the
-         model echoes a random heading from the PDFs instead of answering.
-      2. "Lost in the middle" -- transformer attention concentrates on the
-         start and end of the input. Question at the top + answer cue at the
-         bottom keeps the model anchored on the right task.
+    Accepts either a folder (we'll pick the first .gguf inside) or a direct
+    .gguf path in ``HF_CHAT_MODEL_LOCAL_PATH``. Folder mode is convenient
+    when ``scripts/download_models.py`` placed the file into a model-named
+    directory -- the caller doesn't have to know the exact filename.
     """
-    context = "\n\n---\n\n".join(context_blocks) if context_blocks else "(no context)"
+    raw_path = config.HF_CHAT_MODEL_LOCAL_PATH
+    if not raw_path:
+        raise RuntimeError(
+            "HF_CHAT_MODEL_LOCAL_PATH is not set. Point it at a .gguf file or a "
+            "folder containing one (see scripts/download_models.py)."
+        )
+    path = Path(raw_path).resolve()
+    if not path.exists():
+        raise FileNotFoundError(f"HF chat model path not found: {path}")
+
+    if path.is_dir():
+        # Pick the first GGUF we find. If there are multiple quantization levels
+        # in the same folder, callers should point at a specific file instead.
+        gguf_files = sorted(path.glob("*.gguf"))
+        if not gguf_files:
+            raise FileNotFoundError(f"No .gguf file under: {path}")
+        return gguf_files[0]
+    return path
+
+
+def _load_chat_model() -> Any:
+    """Load and cache the llama.cpp ``Llama`` instance.
+
+    Lazy-imported so ``pytest`` and other entry points that never call into
+    the LLM don't pay the C-extension import cost, and so a broken install
+    fails loudly *at query time* with an actionable error rather than on
+    module import where the traceback is harder to place.
+    """
+    global _llm
+    with _llm_lock:
+        if _llm is not None:
+            return _llm
+
+        from llama_cpp import Llama
+
+        model_path = _resolve_chat_model_path()
+        # n_ctx: max tokens in the (prompt + generation) window. 4096 is plenty
+        # for RAG with top-3 chunks and leaves room for future tweaks without
+        # overflowing. Qwen2.5 natively supports 32K, but a smaller n_ctx keeps
+        # the KV cache (and therefore RAM) small on this machine.
+        # n_threads: match physical core count. Hyperthreads (logical cores)
+        # usually *hurt* llama.cpp throughput because they contend for the
+        # same AVX execution units.
+        _llm = Llama(
+            model_path=str(model_path),
+            n_ctx=config.LLM_CONTEXT_TOKENS,
+            n_threads=config.LLM_CPU_THREADS,
+            n_gpu_layers=0,
+            verbose=False,
+        )
+        return _llm
+
+
+def _compose_user_message(query: str, context_blocks: list[str], role: Role) -> str:
+    """Build the user-role message that combines question + retrieved context.
+
+    We do NOT paste the context into the system prompt -- instruct models are
+    trained to treat system prompts as global rules and user prompts as the
+    actual task. Putting the context in the user turn keeps that contract
+    intact and makes the model more likely to actually use the context.
+    """
+    context = "\n\n---\n\n".join(context_blocks) if context_blocks else "(no context provided)"
     role_line = _role_instructions(role)
-    return f"""You are a product documentation assistant.
-
-{role_line}
-
-Rules (must follow):
-- Answer ONLY based on the provided context below. Do not invent facts.
-- If the context does not contain enough information, say so plainly and
-  suggest what part of the documentation is missing.
-- Write a direct, well-formed answer; do not echo headings from the context.
+    return f"""{role_line}
 
 Question:
 {query}
 
 Context (use this to answer the question above):
-{context}
-
-Answer:"""
+{context}"""
 
 
-def _resolve_chat_model_ref() -> tuple[str, bool]:
-    """Resolve (model_ref, local_files_only) honoring OFFLINE_ONLY."""
-    if config.OFFLINE_ONLY:
-        if not config.HF_CHAT_MODEL_LOCAL_PATH:
-            raise RuntimeError("OFFLINE_ONLY is enabled but HF_CHAT_MODEL_LOCAL_PATH is not set.")
-        model_path = Path(config.HF_CHAT_MODEL_LOCAL_PATH).resolve()
-        if not model_path.exists():
-            raise FileNotFoundError(f"HF chat model path not found: {model_path}")
-        return str(model_path), True
-    model_ref = config.HF_CHAT_MODEL_LOCAL_PATH or config.HF_CHAT_MODEL
-    return model_ref, bool(config.HF_CHAT_MODEL_LOCAL_PATH)
+# Kept under their old names so existing tests keep passing. These are pure
+# string-assembly helpers -- no model required.
+def _build_prompt(query: str, context_blocks: list[str], role: Role) -> str:
+    """Legacy prompt assembler kept for tests and for API parity.
 
-
-def _load_chat_model() -> tuple[Any, Any]:
-    """Load (and cache) the tokenizer and seq2seq model.
-
-    Uses ``AutoModelForSeq2SeqLM`` + ``.generate()`` directly rather than
-    ``transformers.pipeline("text2text-generation", ...)`` because that pipeline
-    task was removed in transformers 5.x. The explicit API is also stable across
-    4.x and 5.x and lets us cache weights between queries instead of reloading
-    the ~1 GB checkpoint on every call.
+    The GGUF chat path uses ``_compose_user_message`` + the model's chat
+    template, but pure string tests still assert on the old structure
+    (question before context, grounding rules present, etc.). Returning a
+    flattened version here means those assertions stay meaningful without
+    duplicating the rule copy.
     """
-    global _llm_tokenizer, _llm_model
-    with _llm_lock:
-        if _llm_tokenizer is not None and _llm_model is not None:
-            return _llm_tokenizer, _llm_model
-
-        from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
-
-        model_ref, local_files_only = _resolve_chat_model_ref()
-        _llm_tokenizer = AutoTokenizer.from_pretrained(model_ref, local_files_only=local_files_only)
-        _llm_model = AutoModelForSeq2SeqLM.from_pretrained(
-            model_ref, local_files_only=local_files_only
-        )
-        _llm_model.eval()
-        return _llm_tokenizer, _llm_model
-
-
-def _answer_hf_local(prompt: str) -> str:
-    """Local seq2seq model for security-focused, no-external-API inference."""
-    tokenizer, model = _load_chat_model()
-
-    # Truncate at the tokenizer boundary (not character count) so the model
-    # sees a valid window; character-based clipping can land mid-token and
-    # confuse the encoder. Budgets are centralised in config.py so swapping
-    # in a different model doesn't require touching this file.
-    encoded_prompt = tokenizer(
-        prompt,
-        return_tensors="pt",
-        truncation=True,
-        max_length=config.LLM_MAX_INPUT_TOKENS,
-    )
-    output_ids = model.generate(
-        **encoded_prompt,
-        max_new_tokens=config.LLM_MAX_NEW_TOKENS,
-        do_sample=False,
-    )
-    return tokenizer.decode(output_ids[0], skip_special_tokens=True).strip()
+    user_message = _compose_user_message(query, context_blocks, role)
+    return f"{_SYSTEM_PROMPT}\n\n{user_message}\n\nAnswer:"
 
 
 def generate_answer(
@@ -133,8 +165,30 @@ def generate_answer(
     retrieved_texts: list[str],
     role: Role = "customer",
 ) -> tuple[str, str]:
+    """Run a single chat completion and return ``(answer, backend_label)``.
+
+    ``backend_label`` stays ``"huggingface_local"`` for API compatibility with
+    callers that already log / branch on it. The actual backend is now
+    llama.cpp -- but that's an implementation detail, not a contract.
     """
-    Returns (answer, backend) where backend is always 'huggingface_local'.
-    """
-    prompt = _build_prompt(query, retrieved_texts, role)
-    return _answer_hf_local(prompt), "huggingface_local"
+    llm = _load_chat_model()
+    user_message = _compose_user_message(query, retrieved_texts, role)
+
+    # ``create_chat_completion`` applies the model's chat template (special
+    # tokens for system / user / assistant turns) internally. Qwen2.5 uses
+    # ChatML, and getting those tokens wrong by hand would silently degrade
+    # quality -- letting llama.cpp do it is both safer and less code.
+    response = llm.create_chat_completion(
+        messages=[
+            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "user", "content": user_message},
+        ],
+        max_tokens=config.LLM_MAX_NEW_TOKENS,
+        temperature=0.2,
+        top_p=0.9,
+        # Repetition penalty keeps the model from looping on long contexts;
+        # 1.1 is the llama.cpp convention for "gentle nudge, no damage".
+        repeat_penalty=1.1,
+    )
+    answer = response["choices"][0]["message"]["content"].strip()
+    return answer, "huggingface_local"

@@ -30,17 +30,43 @@ def test_prompt_includes_query_and_context():
 
 def test_prompt_with_no_context_uses_placeholder():
     prompt = _build_prompt(query="Anything?", context_blocks=[], role="customer")
-    assert "(no context)" in prompt
+    # The exact placeholder wording has drifted a couple of times; what matters
+    # is that *some* "no context" sentinel is present so the model can see the
+    # context slot is intentionally empty rather than a template rendering bug.
+    assert "no context" in prompt.lower()
 
 
 def test_prompt_grounding_rules_present():
     prompt = _build_prompt(query="x", context_blocks=["y"], role="sales")
     lower = prompt.lower()
-    assert "only based on the provided context" in lower
-    # Accept either the old or new phrasing so tightening the wording later
-    # doesn't keep breaking this test. What matters is that the anti-invention
-    # rule is present somewhere in the prompt.
-    assert "do not invent" in lower or "do not hallucinate" in lower
+    # The "use only the provided context" constraint can be phrased in a few
+    # natural ways. Accept any of them rather than pinning the test to one
+    # exact string -- the assertion that actually matters is that grounding
+    # is enforced somewhere in the prompt.
+    assert any(
+        phrase in lower
+        for phrase in (
+            "only based on the provided context",
+            "use only the facts",
+            "only the facts contained in the context",
+        )
+    )
+    assert any(
+        phrase in lower for phrase in ("never invent", "do not invent", "do not hallucinate")
+    )
+
+
+def test_prompt_demands_rephrasing():
+    """The model must paraphrase, not copy verbatim from the PDFs.
+
+    This is the rule that separates a real RAG answer ("The warranty lasts
+    two years from purchase.") from a useless extractive echo ("Warranty: 2
+    years from purchase."). If someone weakens this rule accidentally, the
+    test fails loudly.
+    """
+    prompt = _build_prompt(query="x", context_blocks=["y"], role="customer")
+    lower = prompt.lower()
+    assert "rephrase" in lower or "your own words" in lower
 
 
 def test_prompt_puts_question_before_context():
