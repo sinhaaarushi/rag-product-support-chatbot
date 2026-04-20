@@ -1,0 +1,52 @@
+# Streamlit hardening for a local, confidential-data deployment.
+#
+# This repo serves retrieval-augmented answers from internal PDFs with no
+# authentication layer in front of it. The defaults that ship with Streamlit
+# are tuned for public demo apps, not for confidential data, so we override
+# them here to shrink the attack surface.
+#
+# Every setting is explained so a future reviewer can tell why it was chosen.
+
+[server]
+# Bind to loopback only. Default Streamlit listens on 0.0.0.0, which means
+# anyone on the same Wi-Fi / VPN can reach http://<your-lan-ip>:8501.
+# For confidential internal documents that is not acceptable.
+address = "127.0.0.1"
+port = 8501
+
+# Keep CORS and XSRF protections ON. Disabling either is a common footgun
+# when embedding in iframes; we don't need to, so we leave them strict.
+enableCORS = true
+enableXsrfProtection = true
+
+# Cap uploads so a stray drag-and-drop can't pin the process on memory.
+# 200 MB is more than enough for the PDFs this pipeline ingests.
+maxUploadSize = 200
+
+# Don't auto-open a browser when streamlit starts. Avoids spawning Edge /
+# Chrome with an unexpected profile in a shared machine setup.
+headless = true
+
+[browser]
+# Disable Streamlit's anonymous usage telemetry. It does NOT transmit app
+# inputs or document content, but on confidential work we want zero
+# outbound chatter from the process.
+gatherUsageStats = false
+# Matches server.address above. Streamlit uses this when rendering the
+# "Network URL" line; pinning it here keeps logs tidy.
+serverAddress = "127.0.0.1"
+
+[global]
+# Production-style error display. Hides full Python tracebacks from the UI
+# in favor of a friendlier message; full errors still go to the terminal
+# for the operator. Less accidental leakage of file paths in a shared demo.
+developmentMode = false
+showWarningOnDirectExecution = false
+
+[client]
+# Do not echo code snippets to the browser when an exception is raised.
+# If you are debugging, run streamlit from the terminal to see the trace.
+showErrorDetails = false
+
+[logger]
+level = "info"

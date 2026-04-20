@@ -20,9 +20,11 @@ set "EMBEDDING_MODEL_LOCAL_PATH=C:\models\all-MiniLM-L6-v2"
 set "HF_CHAT_MODEL_LOCAL_PATH=C:\models\flan-t5-base"
 
 echo Starting dashboard at http://127.0.0.1:8501
+echo Network binding, telemetry, and error display are locked down in
+echo .streamlit\config.toml so these flags don't need to be repeated here.
 echo Close this window to stop the server.
 echo.
 
-".venv\Scripts\streamlit.exe" run "App\dashboard.py" --server.address 127.0.0.1 --server.port 8501
+".venv\Scripts\streamlit.exe" run "App\dashboard.py"
 
 pause

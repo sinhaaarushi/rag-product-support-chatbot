@@ -14,6 +14,9 @@ chatbot_env/
 .env
 .env.*
 !.env.example
+# Streamlit's secrets file is the conventional place for credentials; keep
+# the hardening config.toml tracked but never commit secrets.toml.
+.streamlit/secrets.toml
 
 # --- IDE / OS ---
 .idea/
