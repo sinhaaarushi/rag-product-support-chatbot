@@ -42,20 +42,66 @@ Pipeline:
   - `metadata.json` contains chunk text; protect this folder with OS access controls.
   - Consider disk encryption for sensitive projects.
 
-## Recommended Before Documents
+## Loading your documents
 
-1. Run **Preflight** in dashboard (validates local model paths and embedding runtime).
-2. Confirm naming convention:
-   - default pattern: `^(PSS|FAQ|manual|guide)_[A-Za-z0-9._-]+\.pdf$`
-   - examples:
-     - `PSS_motor_v1.pdf`
-     - `FAQ_returns.pdf`
-     - `manual_installation.pdf`
-     - `guide_quickstart.pdf`
-   - PDFs may live in subfolders under `Data/documents/`; the index stores a stable relative path key.
-3. After **adding, removing, or renaming** PDFs, use **Rebuild index (clear + full re-index)** in the dashboard (or call `rebuild_index_from_documents()`). Batch indexing alone only appends and does not delete stale chunks.
-4. Create a vector-store backup baseline from dashboard.
-5. Keep `ENFORCE_DOC_NAME_PATTERN=true` if you want strict naming validation.
+Drop PDFs anywhere under `Data/documents/`. The folder layout is what drives
+**document type** (PSS, FAQ, manual, guide), and document type drives the
+retrieval weighting in `Retrieval/retriever.py`.
+
+### Recommended layout
+
+```
+Data/documents/
+├── PSS/
+│   ├── ProductA_PSS.pdf
+│   ├── ProductB_ProductSpecSheet.pdf
+│   └── FAQs/
+│       ├── ProductA_FAQ.pdf
+│       └── ProductB_FrequentlyAskedQuestions.pdf
+├── manuals/
+│   └── installation_manual.pdf
+└── guides/
+    └── quickstart_guide.pdf
+```
+
+### How a file gets classified
+
+`infer_document_type_from_name()` resolves type using the path, most-specific
+folder first, then falling back to filename tokens:
+
+| Path under `Data/documents/`            | Inferred type |
+|------------------------------------------|---------------|
+| `PSS/anything.pdf`                       | `PSS`         |
+| `PSS/FAQs/anything.pdf`                  | `FAQ` *(subfolder wins over PSS parent)* |
+| `manuals/setup.pdf`                      | `manual`      |
+| `guides/quickstart.pdf`                  | `guide`       |
+| `MotorXYZ_ProductSpecSheet.pdf`          | `PSS` *(filename token)* |
+| `BoilerABC_FrequentlyAskedQuestions.pdf` | `FAQ` *(filename token)* |
+| `random_report.pdf`                      | `default`     |
+
+Matching is case-insensitive and ignores `_`, `-`, and spaces.
+
+### Filename validation (optional)
+
+By default any `*.pdf` is accepted. If you want a strict naming convention
+(e.g. for governance), set:
+
+```powershell
+$env:DOC_NAME_PATTERN = '^(PSS|FAQ|manual|guide)_[A-Za-z0-9._-]+\.pdf$'
+$env:ENFORCE_DOC_NAME_PATTERN = "true"
+```
+
+### Indexing workflow
+
+1. Run **Preflight** in the dashboard to confirm local model paths resolve and
+   the embedding runtime works.
+2. Drop PDFs under `Data/documents/` following the layout above.
+3. Open the dashboard, go to the **Index Document** tab, and click
+   **Rebuild index (clear + full re-index)**. This is the safe default after
+   any add/remove/rename — batch indexing only appends and won't delete stale
+   chunks for files you removed.
+4. (Optional but recommended) Create a baseline backup from the **Diagnostics**
+   tab so you can restore the index without re-embedding everything.
 
 ## Setup
 
