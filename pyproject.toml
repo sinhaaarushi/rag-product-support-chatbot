@@ -8,6 +8,8 @@ version = "0.1.0"
 description = "Local RAG over product PDFs (FAISS + Hugging Face)"
 readme = "README.md"
 requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "Aarushi Sinha" }]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
