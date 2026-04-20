@@ -35,7 +35,11 @@ CHUNK_SIZE: int = int(os.getenv("CHUNK_SIZE", "500"))
 CHUNK_OVERLAP: int = int(os.getenv("CHUNK_OVERLAP", "50"))
 
 # --- Retrieval ---
-TOP_K: int = int(os.getenv("TOP_K", "5"))
+# 3 chunks comfortably fits Flan-T5's 512-token encoder window with headroom
+# for the prompt template and question. Bumping this to 5+ overflows the
+# window and the model starts hallucinating from truncated context; if you
+# swap in a model with a larger context, raise this accordingly.
+TOP_K: int = int(os.getenv("TOP_K", "3"))
 # Retrieve extra candidates so weighted re-ranking can surface PSS-heavy hits
 RETRIEVAL_CANDIDATES: int = int(os.getenv("RETRIEVAL_CANDIDATES", "20"))
 

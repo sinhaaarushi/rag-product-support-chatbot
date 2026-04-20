@@ -37,7 +37,26 @@ def test_prompt_grounding_rules_present():
     prompt = _build_prompt(query="x", context_blocks=["y"], role="sales")
     lower = prompt.lower()
     assert "only based on the provided context" in lower
-    assert "do not hallucinate" in lower
+    # Accept either the old or new phrasing so tightening the wording later
+    # doesn't keep breaking this test. What matters is that the anti-invention
+    # rule is present somewhere in the prompt.
+    assert "do not invent" in lower or "do not hallucinate" in lower
+
+
+def test_prompt_puts_question_before_context():
+    """Truncation safety: Flan-T5's 512-token encoder window means overflow
+    drops the *end* of the prompt. Keeping the question ahead of the context
+    guarantees the actual task survives truncation even on long contexts.
+    """
+    prompt = _build_prompt(
+        query="MARKER_QUESTION",
+        context_blocks=["MARKER_CONTEXT"],
+        role="customer",
+    )
+    assert prompt.index("MARKER_QUESTION") < prompt.index("MARKER_CONTEXT")
+    # And "Answer:" should trail everything else so the model's generation
+    # cue isn't buried mid-prompt.
+    assert prompt.rstrip().endswith("Answer:")
 
 
 def test_prompt_separates_multiple_context_blocks():

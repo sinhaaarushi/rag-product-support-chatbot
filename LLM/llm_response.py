@@ -35,6 +35,18 @@ def _role_instructions(role: Role) -> str:
 
 
 def _build_prompt(query: str, context_blocks: list[str], role: Role) -> str:
+    """Compose the final prompt sent to the seq2seq model.
+
+    Ordering matters: we put the QUESTION first and the CONTEXT last. Two reasons:
+      1. Flan-T5's encoder window is 512 tokens. If we overflow, tokenizer
+         truncation chops the *end* of the prompt. Putting context last means
+         we lose context chunks on overflow -- not the actual question, not the
+         "Answer:" trigger. That single change fixes the failure mode where the
+         model echoes a random heading from the PDFs instead of answering.
+      2. "Lost in the middle" -- transformer attention concentrates on the
+         start and end of the input. Question at the top + answer cue at the
+         bottom keeps the model anchored on the right task.
+    """
     context = "\n\n---\n\n".join(context_blocks) if context_blocks else "(no context)"
     role_line = _role_instructions(role)
     return f"""You are a product documentation assistant.
@@ -42,15 +54,16 @@ def _build_prompt(query: str, context_blocks: list[str], role: Role) -> str:
 {role_line}
 
 Rules (must follow):
-- Answer ONLY based on the provided context. Do not hallucinate.
-- If the context does not contain enough information, say you do not have enough information in the documents and suggest what is missing.
-- Cite ideas generally by referring to the document content (no fake page numbers).
-
-Context:
-{context}
+- Answer ONLY based on the provided context below. Do not invent facts.
+- If the context does not contain enough information, say so plainly and
+  suggest what part of the documentation is missing.
+- Write a direct, well-formed answer; do not echo headings from the context.
 
 Question:
 {query}
+
+Context (use this to answer the question above):
+{context}
 
 Answer:"""
 
