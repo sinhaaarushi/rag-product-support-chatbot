@@ -376,9 +376,7 @@ def query_documents_streaming(
         len(sources),
         top_raw_score,
     )
-    return metadata, generate_answer_streaming(
-        query, context_texts, role=role
-    )
+    return metadata, generate_answer_streaming(query, context_texts, role=role)
 
 
 def backup_vector_store() -> str:
