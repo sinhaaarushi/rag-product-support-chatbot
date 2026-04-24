@@ -5,6 +5,7 @@ huggingface-hub>=0.23.0,<3.0
 transformers>=4.40.0,<6.0
 torch>=2.0.0,<3.0
 streamlit>=1.35.0,<2.0
+python-dotenv>=1.0.0,<2.0
 faiss-cpu>=1.8.0,<2.0
 # LLM inference via a 4-bit quantized GGUF model. Install with the CPU wheel
 # index so pip fetches a prebuilt binary instead of compiling from source:

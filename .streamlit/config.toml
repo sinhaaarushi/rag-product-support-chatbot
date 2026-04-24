@@ -27,6 +27,13 @@ maxUploadSize = 200
 # Chrome with an unexpected profile in a shared machine setup.
 headless = true
 
+# Serve files in ./static/ at /app/static/<path>. We use this to expose the
+# source PDFs via HTTP so the citation chips in the chat can link to them
+# directly -- a file:// link would be blocked by the browser from an http://
+# origin, so going through Streamlit's own server is the only clean option.
+# Only files placed under ./static/ are served; the rest of the repo isn't.
+enableStaticServing = true
+
 [browser]
 # Disable Streamlit's anonymous usage telemetry. It does NOT transmit app
 # inputs or document content, but on confidential work we want zero
@@ -51,13 +58,13 @@ showErrorDetails = false
 [logger]
 level = "info"
 
-# Visual theme. Chosen to look less like a stock Streamlit demo: a deep
-# navy canvas with a teal accent and a slightly warmer surface color for
-# cards/expanders. If you prefer light mode, set base = "light" and invert.
+# Visual theme. Tuned to match the custom CSS in App/dashboard.py so that
+# Streamlit-native widgets (sliders, buttons outside the role picker, etc.)
+# don't visibly clash with the cyan-on-navy palette used elsewhere.
 [theme]
 base = "dark"
-primaryColor = "#4FD1C5"
-backgroundColor = "#0E1117"
-secondaryBackgroundColor = "#1A1F2B"
+primaryColor = "#22D3EE"
+backgroundColor = "#0B0F1A"
+secondaryBackgroundColor = "#141925"
 textColor = "#E6EDF3"
 font = "sans serif"

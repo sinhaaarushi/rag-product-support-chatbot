@@ -39,7 +39,11 @@ def main() -> int:
         description=__doc__, formatter_class=argparse.RawTextHelpFormatter
     )
     parser.add_argument("query", help="The question to ask.")
-    parser.add_argument("--role", choices=["customer", "sales"], default="customer")
+    parser.add_argument(
+        "--role",
+        choices=["customer", "internal", "sales"],
+        default="customer",
+    )
     parser.add_argument("--top", type=int, default=5, help="Number of source rows to print.")
     args = parser.parse_args()
 

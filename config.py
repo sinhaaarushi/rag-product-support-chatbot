@@ -12,11 +12,20 @@ from pathlib import Path
 # Project root (directory containing this file)
 PROJECT_ROOT = Path(__file__).resolve().parent
 
+# Optional: load project .env so Streamlit/IDE runs see model paths
+# without using run_local.bat. Keep .env out of version control.
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(PROJECT_ROOT / ".env")
+except ImportError:
+    pass
+
 # --- Assistant branding ---
 # Name the UI uses when introducing itself ("Hello, my name's <X>..."). Change
 # the default here or set ASSISTANT_NAME in the environment to rebrand without
 # touching dashboard code. Keep it short -- it sits inside a chat bubble.
-ASSISTANT_NAME: str = os.getenv("ASSISTANT_NAME", "Aura")
+ASSISTANT_NAME: str = os.getenv("ASSISTANT_NAME", "Yntraa")
 
 # Support contact shown in the out-of-scope fallback. Override via env var or
 # edit the default here -- it's intentionally kept in one place so the real

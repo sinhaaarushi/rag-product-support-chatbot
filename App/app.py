@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Literal
 
 import config
 from Embeddings.embedding_generator import embed_text
-from LLM.llm_response import generate_answer
+from LLM.llm_response import generate_answer, generate_answer_streaming
 from pipeline import (
     list_pdf_files_under,
     run_batch_indexing_pipeline,
@@ -167,9 +168,72 @@ def _out_of_scope_message() -> str:
     )
 
 
+def _source_match_label(top_raw: float) -> str:
+    """Defensible high/medium/low from retrieval score (not a made-up percentage)."""
+    if top_raw >= 0.55:
+        return "High"
+    if top_raw >= 0.45:
+        return "Medium"
+    return "Low"
+
+
+def _build_reasoning_steps_in_scope(n_chunks: int, top_raw: float) -> list[str]:
+    """Honest, pipeline-accurate steps (no model chain-of-thought)."""
+    steps: list[str] = [
+        f"Retrieved {n_chunks} text chunk(s) from the local FAISS index to use as context.",
+    ]
+    if config.USE_RERANKER:
+        steps.append(
+            "Re-ranked the candidate set with a cross-encoder and combined that with the "
+            "vector score (document-type weighting can still act as a tie-breaker)."
+        )
+    else:
+        steps.append(
+            "Ranked chunks by vector similarity to the question embedding, with retriever "
+            "document-type weighting as configured."
+        )
+    steps.append(
+        f"Top retrieved chunk had raw cosine similarity {top_raw:.2f} "
+        f"(this product answers only when the best match is ≥ {config.MIN_RETRIEVAL_SCORE:.2f})."
+    )
+    steps.append(
+        "Generated a reply with the local model under a strict 'use only this context' rule, "
+        "plus the audience (role) you selected."
+    )
+    return steps
+
+
+def _build_reasoning_steps_out_of_scope(n_candidates: int, top_raw: float) -> list[str]:
+    return [
+        f"Embedded the question and considered up to {n_candidates} candidate chunk(s) from the index.",
+        f"The strongest match had raw similarity {top_raw:.2f}, below the minimum "
+        f"{config.MIN_RETRIEVAL_SCORE:.2f} used to trust the documentation for an answer.",
+        "Skipped the language model for this turn to avoid a confident-sounding but poorly grounded reply.",
+    ]
+
+
+def _heuristic_follow_ups(sources: list[dict]) -> list[str]:
+    """Cheap follow-ups from other cited document names; no second LLM call."""
+    if not sources:
+        return []
+    order = list(
+        dict.fromkeys(
+            str(Path(s.get("document_name", "")).name) for s in sources if s.get("document_name")
+        )
+    )
+    if not order:
+        return []
+    if len(order) == 1:
+        return [f"Summarize other details from {order[0]} that relate to this question."]
+    return [
+        f"How do {order[0]} and {order[1]} differ on this topic?",
+        f"What else in {order[0]} should I know after this answer?",
+    ][:2]
+
+
 def query_documents(
     query: str,
-    role: Literal["customer", "sales"] = "customer",
+    role: Literal["customer", "internal", "sales"] = "customer",
     include_sources: bool = False,
 ) -> dict:
     """Run retrieval + LLM answer for one query and return the response payload.
@@ -206,12 +270,16 @@ def query_documents(
             top_raw_score,
             config.MIN_RETRIEVAL_SCORE,
         )
+        n_c = len(retrieved_chunks)
         response: dict = {
             "answer": _out_of_scope_message(),
             "role": role,
             "llm_backend": "fallback",
             "out_of_scope": True,
             "top_retrieval_score": top_raw_score,
+            "source_match": "No match",
+            "reasoning_steps": _build_reasoning_steps_out_of_scope(n_c, top_raw_score),
+            "follow_ups": [],
         }
         if include_sources:
             response["sources"] = []
@@ -220,15 +288,19 @@ def query_documents(
     context_texts = [c.text for c in retrieved_chunks if c.text.strip()]
     answer, backend = generate_answer(query, context_texts, role=role)
 
+    src_dicts = chunks_to_context_dicts(retrieved_chunks)
     response = {
         "answer": answer,
         "role": role,
         "llm_backend": backend,
         "out_of_scope": False,
         "top_retrieval_score": top_raw_score,
+        "source_match": _source_match_label(top_raw_score),
+        "reasoning_steps": _build_reasoning_steps_in_scope(len(context_texts), top_raw_score),
+        "follow_ups": _heuristic_follow_ups(src_dicts),
     }
     if include_sources:
-        response["sources"] = chunks_to_context_dicts(retrieved_chunks)
+        response["sources"] = src_dicts
     logger.info(
         "query role=%s sources=%s top_score=%.3f",
         role,
@@ -236,6 +308,77 @@ def query_documents(
         top_raw_score,
     )
     return response
+
+
+def query_documents_streaming(
+    query: str,
+    role: Literal["customer", "internal", "sales"] = "customer",
+) -> tuple[dict, Iterator[str]]:
+    """Streaming variant of ``query_documents``.
+
+    Returns a ``(metadata, token_iterator)`` tuple. Why split the return
+    value:
+
+    - Retrieval outcomes (sources, out-of-scope decision, top score) are
+      known *before* the LLM runs. Putting them in ``metadata`` lets the
+      UI render source chips as soon as the stream ends, without a second
+      call back through the pipeline.
+    - ``token_iterator`` yields string deltas from the LLM. For the
+      out-of-scope case we still return an iterator (yielding the single
+      fallback message) so the caller has a uniform contract: "always
+      iterate, concatenate the result, render the sources". That keeps
+      the dashboard code free of special-casing for the fast path.
+    """
+    retrieved_chunks = retrieve_for_query(query)
+    top_raw_score = max((c.score for c in retrieved_chunks), default=0.0)
+
+    if not retrieved_chunks or top_raw_score < config.MIN_RETRIEVAL_SCORE:
+        logger.info(
+            "query role=%s out_of_scope=true top_score=%.3f threshold=%.3f streaming=true",
+            role,
+            top_raw_score,
+            config.MIN_RETRIEVAL_SCORE,
+        )
+        fallback = _out_of_scope_message()
+        n_c = len(retrieved_chunks)
+        metadata: dict = {
+            "role": role,
+            "out_of_scope": True,
+            "top_retrieval_score": top_raw_score,
+            "sources": [],
+            "llm_backend": "fallback",
+            "source_match": "No match",
+            "reasoning_steps": _build_reasoning_steps_out_of_scope(n_c, top_raw_score),
+            "follow_ups": [],
+        }
+
+        def _fallback_stream() -> Iterator[str]:
+            yield fallback
+
+        return metadata, _fallback_stream()
+
+    context_texts = [c.text for c in retrieved_chunks if c.text.strip()]
+    sources = chunks_to_context_dicts(retrieved_chunks)
+    metadata = {
+        "role": role,
+        "out_of_scope": False,
+        "top_retrieval_score": top_raw_score,
+        "sources": sources,
+        "llm_backend": "huggingface_local",
+        "source_match": _source_match_label(top_raw_score),
+        "reasoning_steps": _build_reasoning_steps_in_scope(len(context_texts), top_raw_score),
+        "follow_ups": _heuristic_follow_ups(sources),
+    }
+
+    logger.info(
+        "query role=%s sources=%s top_score=%.3f streaming=true",
+        role,
+        len(sources),
+        top_raw_score,
+    )
+    return metadata, generate_answer_streaming(
+        query, context_texts, role=role
+    )
 
 
 def backup_vector_store() -> str:

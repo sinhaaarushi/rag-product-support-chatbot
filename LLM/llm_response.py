@@ -13,13 +13,15 @@ Public API: ``generate_answer(query, retrieved_texts, role)`` returns
 
 from __future__ import annotations
 
+import re
 import threading
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, Literal
 
 import config
 
-Role = Literal["customer", "sales"]
+Role = Literal["customer", "internal", "sales"]
 
 # Module-level cache: loading a 1 GB GGUF and spinning up the ggml context
 # takes ~5-10 s on CPU. Doing that once per process (not once per query) is
@@ -42,7 +44,78 @@ Rules (must follow):
   meant, even if the wording is informal or incomplete.
 - If the context does not contain enough information to answer the question,
   reply with one short sentence saying so. Do not pad with unrelated facts.
+- NEVER invent numbers, prices, dates, percentages, SLA figures or capacities
+  that are not present in the context. If a specific figure is requested but
+  the context does not contain it, say so plainly.
+- NEVER substitute placeholder tokens for missing figures. Do NOT write
+  "$X", "$Y", "Rs. X", "INR Y", "[TBD]", "XX.XX", "<price>", "(price)",
+  "Contact sales for pricing", or similar stand-ins. Either give the real
+  figure from the context or state that the documentation does not list it.
+- Prices in this documentation are in Indian Rupees (INR, symbol ₹), NOT
+  US dollars. Do not introduce a "$" symbol unless it literally appears in
+  the context.
+- When the context names specific plan/SKU identifiers (e.g. VDaaSGP.1X-Large),
+  preserve those exact names -- do not rename them to friendlier labels.
 - Keep answers concise: 2-5 sentences unless the user asks for detail."""
+
+
+# ---------------------------------------------------------------------------
+# Fabrication guard
+# ---------------------------------------------------------------------------
+
+# Placeholder patterns to detect when the model couldn't find a real figure
+# in the context and fell back to inventing a template-looking answer.
+#
+# Why regex and not an LLM judge: this is a safety net, not a reviewer. Speed
+# and determinism matter more than nuance; a fast cheap check that catches
+# the 90% obvious cases is worth more than a slow accurate one.
+#
+# Each pattern is carefully narrow so it does NOT match legitimate output:
+#   - r"\$\s*[A-Z]\b"      catches "$X", "$ Y" -- but not "$5" or "$12.50"
+#   - r"₹\s*[A-Z]\b"       catches "₹X"        -- but not "₹5,000"
+#   - r"(?i)Rs\.?\s*[A-Z]\b"          "Rs. X"  -- but not "Rs. 500"
+#   - r"(?i)INR\s+[A-Z]\b"            "INR Y"  -- but not "INR 1,200"
+#   - r"\bXX+\.\d+"        catches "XX.XX", "XXX.99"
+#   - r"\[(TBD|XX+|price|amount|figure|value)\]"  "[TBD]", "[price]" etc.
+#   - r"<(price|amount|figure|value)>"            "<price>", "<amount>"
+_FABRICATION_PATTERNS = [
+    re.compile(r"\$\s*[A-Z]\b"),
+    re.compile(r"₹\s*[A-Z]\b"),
+    re.compile(r"\bRs\.?\s*[A-Z]\b", re.IGNORECASE),
+    re.compile(r"\bINR\s+[A-Z]\b", re.IGNORECASE),
+    re.compile(r"\bXX+(?:\.\d+)?\b"),
+    re.compile(r"\[(?:TBD|XX+|price|amount|figure|value)\]", re.IGNORECASE),
+    re.compile(r"<(?:price|amount|figure|value)>", re.IGNORECASE),
+]
+
+
+def _looks_like_fabricated_answer(answer: str) -> bool:
+    """Return True if the answer contains obvious placeholder hallucinations.
+
+    Separated from ``generate_answer`` so tests can exercise the detector
+    directly and so we can reuse it from the streaming path without
+    duplicating the regex list.
+    """
+    if not answer:
+        return False
+    for pattern in _FABRICATION_PATTERNS:
+        if pattern.search(answer):
+            return True
+    return False
+
+
+def _fabrication_fallback() -> str:
+    """Message returned when the detector trips.
+
+    Deliberately tells the user the figure isn't in the documentation and
+    points them at the support email rather than silently returning a blank
+    bubble -- blank bubbles make users suspect the app is broken.
+    """
+    return (
+        "I don't have that specific figure in the documents I can see. "
+        f"For current numbers, please reach out to {config.SUPPORT_EMAIL} "
+        "and our team will share the latest schedule."
+    )
 
 
 def _role_instructions(role: Role) -> str:
@@ -54,7 +127,15 @@ def _role_instructions(role: Role) -> str:
     if role == "customer":
         return (
             "Audience: end customer. Use clear, concise language. "
-            "Focus on practical information and avoid internal sales jargon."
+            "Focus on practical information and avoid internal jargon, "
+            "pricing positioning, or competitive talking points."
+        )
+    if role == "internal":
+        return (
+            "Audience: internal employee (non-sales -- e.g. support, "
+            "operations, engineering). You may include technical detail, "
+            "implementation notes, and architectural context where the "
+            "source material supports it. Prefer precision over marketing tone."
         )
     if role == "sales":
         return (
@@ -126,7 +207,11 @@ def _load_chat_model() -> Any:
         return _llm
 
 
-def _compose_user_message(query: str, context_blocks: list[str], role: Role) -> str:
+def _compose_user_message(
+    query: str,
+    context_blocks: list[str],
+    role: Role,
+) -> str:
     """Build the user-role message that combines question + retrieved context.
 
     We do NOT paste the context into the system prompt -- instruct models are
@@ -147,7 +232,11 @@ Context (use this to answer the question above):
 
 # Kept under their old names so existing tests keep passing. These are pure
 # string-assembly helpers -- no model required.
-def _build_prompt(query: str, context_blocks: list[str], role: Role) -> str:
+def _build_prompt(
+    query: str,
+    context_blocks: list[str],
+    role: Role,
+) -> str:
     """Legacy prompt assembler kept for tests and for API parity.
 
     The GGUF chat path uses ``_compose_user_message`` + the model's chat
@@ -191,4 +280,56 @@ def generate_answer(
         repeat_penalty=1.1,
     )
     answer = response["choices"][0]["message"]["content"].strip()
+
+    # Safety net: even with strong prompt rules, the model will occasionally
+    # fabricate placeholder-looking figures when the context doesn't contain
+    # a requested number. Replacing such answers with an honest fallback is
+    # worth more for user trust than the rare false positive.
+    if _looks_like_fabricated_answer(answer):
+        return _fabrication_fallback(), "fabrication_guard"
+
     return answer, "huggingface_local"
+
+
+def generate_answer_streaming(
+    query: str,
+    retrieved_texts: list[str],
+    role: Role = "customer",
+) -> Iterator[str]:
+    """Yield answer tokens as they are generated.
+
+    Functionally identical to ``generate_answer`` -- same prompt, same
+    inference parameters, same model -- but flips ``stream=True`` so the
+    UI can render words the moment they arrive. Total wall-clock time to
+    a finished answer is unchanged; what changes is *perceived* latency:
+    the user sees something happen at t=0 instead of staring at a spinner
+    for 30+ seconds.
+
+    Yields raw string deltas. Callers are expected to concatenate them
+    (or pass this generator directly to ``st.write_stream`` which does
+    the concatenation and returns the final string).
+    """
+    llm = _load_chat_model()
+    user_message = _compose_user_message(query, retrieved_texts, role)
+
+    stream = llm.create_chat_completion(
+        messages=[
+            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "user", "content": user_message},
+        ],
+        max_tokens=config.LLM_MAX_NEW_TOKENS,
+        temperature=0.2,
+        top_p=0.9,
+        repeat_penalty=1.1,
+        stream=True,
+    )
+    # llama-cpp-python streams chunks with the same shape OpenAI uses:
+    # {"choices": [{"delta": {"content": "..."}}]}. We only care about the
+    # text delta; role/finish_reason/etc. don't affect the rendered answer.
+    for chunk in stream:
+        choices = chunk.get("choices") or []
+        if not choices:
+            continue
+        delta = choices[0].get("delta", {}).get("content", "")
+        if delta:
+            yield delta

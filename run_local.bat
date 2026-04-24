@@ -20,11 +20,20 @@ REM loader picks the first .gguf it finds inside.
 set "OFFLINE_ONLY=true"
 set "LOCAL_LLM_ONLY=true"
 set "EMBEDDING_MODEL_LOCAL_PATH=C:\models\all-MiniLM-L6-v2"
-REM Qwen 1.5B at Q4_K_M is the quality/speed sweet spot for this laptop.
-REM The 3B model has better answers but takes 5-6 min per response on a
-REM 2-core CPU -- swap the line below if you move to faster hardware.
-set "HF_CHAT_MODEL_LOCAL_PATH=C:\models\qwen2.5-1.5b-instruct"
+REM Must match scripts\download_models.py (Qwen2.5-3B-Instruct-Q4_K_M.gguf).
+REM If you use a different .gguf folder, change this path to that folder.
+set "HF_CHAT_MODEL_LOCAL_PATH=C:\models\qwen2.5-3b-instruct"
 set "RERANKER_MODEL_LOCAL_PATH=C:\models\ms-marco-MiniLM-L6-v2"
+
+REM Pre-launch: materialise App\static\pdfs\ so Streamlit's static file
+REM handler can serve the PDFs that the source chips link to. Streamlit
+REM checks for this folder at *server start*, before the app script runs
+REM -- if we only created it from inside dashboard.py, the first few
+REM clicks would 404 until a browser session had connected.
+".venv\Scripts\python.exe" -m App.pdf_mirror
+if errorlevel 1 (
+    echo WARNING: PDF mirror step failed. Source-chip links will 404.
+)
 
 echo Starting dashboard at http://127.0.0.1:8501
 echo Network binding, telemetry, and error display are locked down in

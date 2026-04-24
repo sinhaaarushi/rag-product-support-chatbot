@@ -22,7 +22,7 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $repoRoot
 
 $env:EMBEDDING_MODEL_LOCAL_PATH = "C:\models\all-MiniLM-L6-v2"
-$env:HF_CHAT_MODEL_LOCAL_PATH   = "C:\models\qwen2.5-1.5b-instruct"
+$env:HF_CHAT_MODEL_LOCAL_PATH   = "C:\models\qwen2.5-3b-instruct"
 $env:RERANKER_MODEL_LOCAL_PATH  = "C:\models\ms-marco-MiniLM-L6-v2"
 $env:OFFLINE_ONLY               = "true"
 

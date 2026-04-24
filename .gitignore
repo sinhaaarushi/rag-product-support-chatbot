@@ -57,3 +57,10 @@ smoke_out.txt
 rebuild.log
 model_download.log
 
+# Static mirror of the source PDFs. Populated at Streamlit startup from
+# Data/documents/ so the UI can deep-link to them over HTTP. Lives next
+# to the main script because Streamlit's static-serving feature looks
+# for a folder literally named "static" next to the entrypoint. Always
+# a derived artifact -- safe to delete and rebuild, never commit.
+App/static/
+

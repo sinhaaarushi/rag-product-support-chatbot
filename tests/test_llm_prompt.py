@@ -9,11 +9,23 @@ from __future__ import annotations
 from LLM.llm_response import _build_prompt, _role_instructions
 
 
-def test_role_instructions_distinct_for_customer_and_sales():
+def test_role_instructions_distinct_across_audiences():
+    """Each supported role must produce a unique guidance string.
+
+    Collapsing two roles into the same text silently removes the whole
+    reason for role-switching in the first place, so this guards against
+    accidental flattening during future refactors.
+    """
     customer = _role_instructions("customer")
+    internal = _role_instructions("internal")
     sales = _role_instructions("sales")
+
     assert customer != sales
+    assert customer != internal
+    assert internal != sales
+
     assert "customer" in customer.lower()
+    assert "internal" in internal.lower()
     assert "sales" in sales.lower()
 
 
