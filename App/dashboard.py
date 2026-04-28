@@ -33,6 +33,94 @@ import streamlit as st  # noqa: E402
 import config  # noqa: E402
 from App.app import query_documents  # noqa: E402
 
+# Cap so a burst of submits cannot enqueue unbounded work in one session.
+_QUERY_QUEUE_MAX = 25
+
+
+def _enqueue_user_queries(*parts: str | None) -> None:
+    """Append non-empty stripped strings to the FIFO; oldest is answered first."""
+    q: list[str] = st.session_state._query_queue
+    for p in parts:
+        if not p:
+            continue
+        s = str(p).strip()
+        if not s:
+            continue
+        if len(q) >= _QUERY_QUEUE_MAX:
+            break
+        q.append(s)
+
+
+def _schedule_queue_ack_or_rerun() -> None:
+    """After an answer, pause before the next queued question so the user can cancel."""
+    if st.session_state._query_queue:
+        st.session_state._queue_prompt_ack_needed = True
+    st.rerun()
+
+
+def _truncate_queue_text(text: str, max_len: int = 160) -> str:
+    collapsed = " ".join(str(text).strip().split())
+    if len(collapsed) <= max_len:
+        return collapsed
+    return collapsed[: max_len - 1] + "…"
+
+
+def _render_pending_queue_strip(queued_snap: list[str]) -> None:
+    """Show FIFO questions waiting above the chat input (after enqueue; before dequeue)."""
+    if not queued_snap or st.session_state.role is None:
+        return
+    n = len(queued_snap)
+    head_label = "In queue" if n > 1 else "Next question"
+    parts: list[str] = [
+        f'<div class="pending-queue-strip" role="status" aria-label="Queued questions">'
+        f'<div class="pq-head">{escape(head_label)} · {n} total</div>'
+    ]
+    limit = min(n, 8)
+    for i in range(limit):
+        line = escape(_truncate_queue_text(queued_snap[i]))
+        parts.append(f'<div class="pq-row"><span class="pq-idx">{i + 1}.</span>{line}</div>')
+    if n > 8:
+        parts.append(
+            f'<div class="pq-row"><span class="pq-idx"></span>+ {n - 8} more in line</div>'
+        )
+    parts.append("</div>")
+    st.markdown("".join(parts), unsafe_allow_html=True)
+
+
+def _render_queue_continuation_gate() -> None:
+    """Between turns: let the user continue to the next queued question or ✕ cancel all.
+
+    Streamlit cannot interrupt a running ``query_documents`` call; cancelling only
+    applies to questions not yet sent.
+    """
+    if not st.session_state.get("_queue_prompt_ack_needed"):
+        return
+    q: list[str] = st.session_state._query_queue
+    if not q:
+        st.session_state._queue_prompt_ack_needed = False
+        return
+    st.info(
+        f"**{len(q)} question(s)** in queue. Continue to answer the next, or cancel everything "
+        "you have not sent yet."
+    )
+    for i, text in enumerate(q[:5]):
+        preview = text if len(text) <= 120 else text[:117] + "…"
+        st.caption(f"{i + 1}. {preview}")
+    if len(q) > 5:
+        st.caption(f"…and {len(q) - 5} more.")
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("Continue — answer next", type="primary", key="queue_continue_btn"):
+            st.session_state._queue_prompt_ack_needed = False
+            st.rerun()
+    with c2:
+        if st.button("✕ Cancel all queued", type="secondary", key="queue_cancel_btn"):
+            st.session_state._query_queue.clear()
+            st.session_state._queue_prompt_ack_needed = False
+            st.rerun()
+    st.stop()
+
+
 # ---------------------------------------------------------------------------
 # Page setup
 # ---------------------------------------------------------------------------
@@ -1036,6 +1124,36 @@ st.markdown(
         color: #64748B !important;
     }}
 
+    /* Snapshot of queued questions directly above the chat bar */
+    .pending-queue-strip {{
+        max-width: min(1280px, 95vw);
+        margin: 0 auto 10px auto;
+        padding: 12px 16px;
+        border-radius: 12px;
+        border: 1px solid rgba(34, 211, 238, 0.22);
+        background: rgba(15, 23, 42, 0.82);
+        font-size: 0.92rem;
+        color: #E2E8F0;
+    }}
+    .pending-queue-strip .pq-head {{
+        color: #67E8F9;
+        font-weight: 600;
+        font-size: 0.74rem;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        margin-bottom: 8px;
+    }}
+    .pending-queue-strip .pq-row {{
+        margin: 4px 0 0 0;
+        padding-left: 0.35rem;
+        line-height: 1.35;
+    }}
+    .pending-queue-strip .pq-idx {{
+        color: #94A3B8;
+        margin-right: 6px;
+        font-variant-numeric: tabular-nums;
+    }}
+
     {_WATERMARK_CSS}
     </style>
     """,
@@ -1057,6 +1175,13 @@ if "messages" not in st.session_state:
 if "_response_time_ms" not in st.session_state:
     # Last few successful query wall times for the stat card average.
     st.session_state._response_time_ms = []
+if "_query_queue" not in st.session_state:
+    # FIFO of user questions when another answer is still being generated;
+    # drained one per rerun so nothing is dropped on double-Enter or chip+type.
+    st.session_state._query_queue = []
+if "_queue_prompt_ack_needed" not in st.session_state:
+    # When True, we show Continue / Cancel before dequeueing the next queued question.
+    st.session_state._queue_prompt_ack_needed = False
 
 
 # ---------------------------------------------------------------------------
@@ -1523,6 +1648,8 @@ _render_sidebar()
 
 _replay_history()
 
+_render_queue_continuation_gate()
+
 if st.session_state.role is None:
     _render_initial_greeting()
 elif not any(
@@ -1540,6 +1667,8 @@ elif not any(
 # Chat input (disabled until a role is picked)
 # ---------------------------------------------------------------------------
 
+_pending_queue_banner = st.empty()
+
 chat_placeholder = (
     f"Ask {config.ASSISTANT_NAME} anything about the product documentation…"
     if st.session_state.role
@@ -1548,17 +1677,26 @@ chat_placeholder = (
 
 typed_prompt = st.chat_input(chat_placeholder, disabled=st.session_state.role is None)
 
-# A suggested-prompt chip click sets _pending_query and reruns; drain it
-# here so the rest of the flow is identical to a typed question. pop() so
-# it's a one-shot -- we never want the same prompt firing twice.
+# Suggested chip / follow-up buttons set _pending_query and rerun; pop so it fires once.
 pending_prompt = st.session_state.pop("_pending_query", None)
-user_prompt = typed_prompt or pending_prompt
+# Typed input and pending chip both enqueue; order is typed first, then pending.
+_enqueue_user_queries(typed_prompt, pending_prompt)
+queued_snap = list(st.session_state._query_queue)
+with _pending_queue_banner.container():
+    _render_pending_queue_strip(queued_snap)
+
+user_prompt = st.session_state._query_queue.pop(0) if st.session_state._query_queue else None
 
 if user_prompt:
-    user_prompt = user_prompt.strip()
+    still_queued = len(st.session_state._query_queue)
     st.session_state.messages.append({"role": "user", "content": user_prompt})
     with st.chat_message("user", avatar="🧑"):
         st.markdown(user_prompt)
+        if still_queued:
+            st.caption(
+                f"{still_queued} more question{'s' if still_queued != 1 else ''} "
+                "in line — after this answer you can continue or ✕ cancel before the next runs."
+            )
 
     with st.chat_message("assistant", avatar="💬"):
         # Custom typing indicator in place of Streamlit's generic gray
@@ -1593,6 +1731,8 @@ if user_prompt:
             st.session_state.messages.append(
                 {"role": "assistant", "content": error_message, "sources": []}
             )
+            if st.session_state._query_queue:
+                _schedule_queue_ack_or_rerun()
         else:
             _elapsed_s = time.perf_counter() - _q_t0
             st.session_state._response_time_ms = (
@@ -1617,3 +1757,5 @@ if user_prompt:
             }
             _render_assistant_extras(asst_msg, turn_idx)
             st.session_state.messages.append(asst_msg)
+            if st.session_state._query_queue:
+                _schedule_queue_ack_or_rerun()
