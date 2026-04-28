@@ -20,8 +20,11 @@ from pathlib import Path
 from typing import Any, Literal
 
 import config
+from Utils.logging_utils import get_logger
 
 Role = Literal["customer", "internal", "sales"]
+
+_logger = get_logger("llm_response")
 
 # Module-level cache: loading a 1 GB GGUF and spinning up the ggml context
 # takes ~5-10 s on CPU. Doing that once per process (not once per query) is
@@ -207,6 +210,39 @@ def _load_chat_model() -> Any:
         return _llm
 
 
+def _clip_context_blocks_for_llm(context_blocks: list[str]) -> list[str]:
+    """Keep highest-priority chunks first; trim so the user turn fits n_ctx.
+
+    Retrieval order is best-first; we take a prefix of chunks that fits
+    ``config.LLM_MAX_RETRIEVED_CHARS`` (including ``---`` separators).
+    """
+    if not context_blocks:
+        return []
+    sep = "\n\n---\n\n"
+    raw = int(config.LLM_MAX_RETRIEVED_CHARS)
+    # Floor keeps tiny misconfig/truncated tests workable; ceiling avoids accidental huge payloads.
+    budget = max(256, min(raw, 200_000))
+    tail_note = "…\n[Additional context omitted to fit the model context window.]"
+    out: list[str] = []
+    used = 0
+    for block in context_blocks:
+        b = block.strip()
+        if not b:
+            continue
+        need = len(b) + (len(sep) if out else 0)
+        if used + need <= budget:
+            out.append(b)
+            used += need
+            continue
+        room = budget - used - (len(sep) if out else 0)
+        if room > len(tail_note) + 24:
+            avail = max(0, room - len(tail_note) - 2)
+            fragment = (b[:avail].rstrip() + "\n" + tail_note) if avail else tail_note
+            out.append(fragment)
+        break
+    return out
+
+
 def _compose_user_message(
     query: str,
     context_blocks: list[str],
@@ -261,24 +297,35 @@ def generate_answer(
     llama.cpp -- but that's an implementation detail, not a contract.
     """
     llm = _load_chat_model()
-    user_message = _compose_user_message(query, retrieved_texts, role)
+    clipped = _clip_context_blocks_for_llm(retrieved_texts)
+    user_message = _compose_user_message(query, clipped, role)
 
     # ``create_chat_completion`` applies the model's chat template (special
     # tokens for system / user / assistant turns) internally. Qwen2.5 uses
     # ChatML, and getting those tokens wrong by hand would silently degrade
     # quality -- letting llama.cpp do it is both safer and less code.
-    response = llm.create_chat_completion(
-        messages=[
-            {"role": "system", "content": _SYSTEM_PROMPT},
-            {"role": "user", "content": user_message},
-        ],
-        max_tokens=config.LLM_MAX_NEW_TOKENS,
-        temperature=0.2,
-        top_p=0.9,
-        # Repetition penalty keeps the model from looping on long contexts;
-        # 1.1 is the llama.cpp convention for "gentle nudge, no damage".
-        repeat_penalty=1.1,
-    )
+    try:
+        response = llm.create_chat_completion(
+            messages=[
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "user", "content": user_message},
+            ],
+            max_tokens=config.LLM_MAX_NEW_TOKENS,
+            temperature=0.2,
+            top_p=0.9,
+            # Repetition penalty keeps the model from looping on long contexts;
+            # 1.1 is the llama.cpp convention for "gentle nudge, no damage".
+            repeat_penalty=1.1,
+        )
+    except Exception as exc:  # noqa: BLE001 -- llama.cpp surfaces various native errors
+        _logger.exception("create_chat_completion failed: %s", exc)
+        return (
+            "The local model could not finish that reply (this often happens if the prompt "
+            "is too large for its context window). Try a shorter question, or retry — "
+            "the app already trims retrieved text, but very long excerpts can still overflow.",
+            "llm_error",
+        )
+
     answer = response["choices"][0]["message"]["content"].strip()
 
     # Safety net: even with strong prompt rules, the model will occasionally
@@ -310,19 +357,29 @@ def generate_answer_streaming(
     the concatenation and returns the final string).
     """
     llm = _load_chat_model()
-    user_message = _compose_user_message(query, retrieved_texts, role)
+    clipped = _clip_context_blocks_for_llm(retrieved_texts)
+    user_message = _compose_user_message(query, clipped, role)
 
-    stream = llm.create_chat_completion(
-        messages=[
-            {"role": "system", "content": _SYSTEM_PROMPT},
-            {"role": "user", "content": user_message},
-        ],
-        max_tokens=config.LLM_MAX_NEW_TOKENS,
-        temperature=0.2,
-        top_p=0.9,
-        repeat_penalty=1.1,
-        stream=True,
-    )
+    try:
+        stream = llm.create_chat_completion(
+            messages=[
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "user", "content": user_message},
+            ],
+            max_tokens=config.LLM_MAX_NEW_TOKENS,
+            temperature=0.2,
+            top_p=0.9,
+            repeat_penalty=1.1,
+            stream=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _logger.exception("create_chat_completion(stream) failed: %s", exc)
+        yield (
+            "The local model could not start streaming (prompt may be too large). "
+            "Try a shorter question or retry."
+        )
+        return
+
     # llama-cpp-python streams chunks with the same shape OpenAI uses:
     # {"choices": [{"delta": {"content": "..."}}]}. We only care about the
     # text delta; role/finish_reason/etc. don't affect the rendered answer.

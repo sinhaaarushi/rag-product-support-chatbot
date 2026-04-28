@@ -133,6 +133,11 @@ LLM_CPU_THREADS: int = int(os.getenv("LLM_CPU_THREADS", "0"))
 LLM_MAX_NEW_TOKENS: int = int(os.getenv("LLM_MAX_NEW_TOKENS", "256"))
 # Legacy alias retained for any callers still importing this name.
 LLM_MAX_INPUT_TOKENS: int = LLM_CONTEXT_TOKENS
+# Cap total characters for retrieved excerpts in the LLM user message. The chat
+# template, system prompt, and reply budget also consume n_ctx; overflowing
+# prompts cause llama_decode -1 and empty failures. ~8.5k chars is a safe fit
+# with LLM_CONTEXT_TOKENS=4096 and typical English tokenization.
+LLM_MAX_RETRIEVED_CHARS: int = int(os.getenv("LLM_MAX_RETRIEVED_CHARS", "8500"))
 
 # Default folder for uploaded PDFs (relative to project root)
 DOCUMENTS_DIR: Path = PROJECT_ROOT / "Data" / "documents"

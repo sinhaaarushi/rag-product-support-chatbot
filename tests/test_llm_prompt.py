@@ -6,7 +6,12 @@ which is the part most likely to regress under refactors.
 
 from __future__ import annotations
 
-from LLM.llm_response import _build_prompt, _role_instructions
+import config
+from LLM.llm_response import (
+    _build_prompt,
+    _clip_context_blocks_for_llm,
+    _role_instructions,
+)
 
 
 def test_role_instructions_distinct_across_audiences():
@@ -106,3 +111,13 @@ def test_prompt_separates_multiple_context_blocks():
     for chunk in ("chunk one", "chunk two", "chunk three"):
         assert chunk in prompt
     assert prompt.count("---") >= 2
+
+
+def test_clip_context_blocks_fits_budget(monkeypatch):
+    """Heavy RAG context must be trimmed so llama.cpp stays within n_ctx."""
+    monkeypatch.setattr(config, "LLM_MAX_RETRIEVED_CHARS", 350)
+    out = _clip_context_blocks_for_llm(["a" * 200, "b" * 400])
+    sep = "\n\n---\n\n"
+    joined = sep.join(out)
+    assert len(joined) <= 356
+    assert len(out) >= 1
