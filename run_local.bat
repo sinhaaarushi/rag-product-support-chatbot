@@ -35,12 +35,23 @@ if errorlevel 1 (
     echo WARNING: PDF mirror step failed. Source-chip links will 404.
 )
 
-echo Starting dashboard at http://127.0.0.1:8501
-echo Network binding, telemetry, and error display are locked down in
-echo .streamlit\config.toml so these flags don't need to be repeated here.
-echo Close this window to stop the server.
+echo Starting dashboard -- URL: http://127.0.0.1:8501
+echo.
+echo IMPORTANT: Browser does NOT open automatically (server.headless is true in
+echo .streamlit\config.toml so a random browser profile isn't launched). Opening
+echo the link for you after a short delay so the server is ready first.
+echo You can bookmark that URL later. Close this window to stop the server.
 echo.
 
+REM Streamlit listens on localhost only; spawn the default browser when the socket is up.
+start "" cmd /c "timeout /t 6 /nobreak >nul && start http://127.0.0.1:8501/"
+
 ".venv\Scripts\streamlit.exe" run "App\dashboard.py"
+if errorlevel 1 (
+    echo.
+    echo If you saw ^"Port 8501 is not available^", another process is using it.
+    echo Close the other terminal or browser tab serving Streamlit, or change
+    echo server.port in .streamlit\config.toml , then try again.
+)
 
 pause

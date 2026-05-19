@@ -13,7 +13,10 @@ Public API: ``generate_answer(query, retrieved_texts, role)`` returns
 
 from __future__ import annotations
 
+import ctypes
+import os
 import re
+import sys
 import threading
 from collections.abc import Iterator
 from pathlib import Path
@@ -22,7 +25,7 @@ from typing import Any, Literal
 import config
 from Utils.logging_utils import get_logger
 
-Role = Literal["customer", "internal", "sales"]
+Role = Literal["customer", "internal", "sales", "partners"]
 
 _logger = get_logger("llm_response")
 
@@ -31,6 +34,27 @@ _logger = get_logger("llm_response")
 # what makes the dashboard feel interactive after the first question.
 _llm: Any | None = None
 _llm_lock = threading.Lock()
+
+
+def _prepare_windows_llama_dlls() -> None:
+    """Expose venv MSVC runtime DLLs before importing llama.cpp on Windows."""
+    if sys.platform != "win32":
+        return
+
+    runtime_dirs = [Path(sys.prefix), Path(sys.prefix) / "Scripts"]
+    for runtime_dir in runtime_dirs:
+        if runtime_dir.exists():
+            os.add_dll_directory(str(runtime_dir))
+            os.environ["PATH"] = str(runtime_dir) + os.pathsep + os.environ.get("PATH", "")
+
+    # llama.cpp's CPU wheel depends on these MSVC runtime DLLs. Preloading them
+    # avoids a misleading "llama.dll not found" error when Windows really means
+    # one of llama.dll's dependencies was not already resolvable.
+    scripts_dir = Path(sys.prefix) / "Scripts"
+    for dll_name in ("vcruntime140_1.dll", "vcomp140.dll"):
+        dll_path = scripts_dir / dll_name
+        if dll_path.exists():
+            ctypes.CDLL(str(dll_path))
 
 # System prompt -- the rules the model follows on every turn. Kept separate
 # from the per-query context so it lives in one place and the chat template
@@ -59,7 +83,26 @@ Rules (must follow):
   the context.
 - When the context names specific plan/SKU identifiers (e.g. VDaaSGP.1X-Large),
   preserve those exact names -- do not rename them to friendlier labels.
-- Keep answers concise: 2-5 sentences unless the user asks for detail."""
+- Keep answers concise: 2-4 sentences unless the user asks for detail.
+- End with a complete sentence. Do not start a detail you cannot finish."""
+
+
+_CUSTOMER_DELIVERY_RULES = """Customer-facing delivery (when the audience line identifies an *end customer*):
+- Answer as a confident product specialist who knows the offering firsthand. Do not hint that
+  replies come from uploaded files, manuals, PDFs, excerpts, or pasted text.
+- Do not use meta-phrases such as: "based on the document(s)", "according to the documentation",
+  "from what you provided" / "shared" / "gave me", "from the information you provided",
+  "from the context", "as stated in the materials", "the docs say", "with what you sent",
+  "the above excerpt", or similar. The visitor should not be reminded that retrieval happened.
+- If a detail is missing from the reference material, say you do not have that specific
+  information here (or offer support contact) without saying "the docs" or "what was supplied"."""
+
+
+def _system_prompt_for_role(role: Role) -> str:
+    """System message: extra delivery rules for customers; unchanged for other audiences."""
+    if role == "customer":
+        return f"{_SYSTEM_PROMPT}\n\n{_CUSTOMER_DELIVERY_RULES}"
+    return _SYSTEM_PROMPT
 
 
 # ---------------------------------------------------------------------------
@@ -107,13 +150,36 @@ def _looks_like_fabricated_answer(answer: str) -> bool:
     return False
 
 
-def _fabrication_fallback() -> str:
+def _clean_answer(answer: str, *, was_truncated: bool = False) -> str:
+    """Normalize model output and remove an unfinished tail after token-limit stops."""
+    cleaned = " ".join((answer or "").strip().split())
+    if not cleaned or not was_truncated:
+        return cleaned
+
+    last_stop = max(cleaned.rfind("."), cleaned.rfind("?"), cleaned.rfind("!"))
+    if last_stop < 0:
+        return cleaned
+
+    candidate = cleaned[: last_stop + 1].strip()
+    # Keep the original when trimming would throw away most of the useful answer.
+    if len(candidate) < max(80, int(len(cleaned) * 0.55)):
+        return cleaned
+    return candidate
+
+
+def _fabrication_fallback(role: Role) -> str:
     """Message returned when the detector trips.
 
-    Deliberately tells the user the figure isn't in the documentation and
-    points them at the support email rather than silently returning a blank
-    bubble -- blank bubbles make users suspect the app is broken.
+    Deliberately tells the user the figure isn't available and points them at
+    support rather than silently returning a blank bubble. Customer wording
+    avoids implying we are reading files on their behalf.
     """
+    if role == "customer":
+        return (
+            "I don't have that specific figure here. "
+            f"Please reach out to {config.SUPPORT_EMAIL} — our team can share "
+            "the latest numbers."
+        )
     return (
         "I don't have that specific figure in the documents I can see. "
         f"For current numbers, please reach out to {config.SUPPORT_EMAIL} "
@@ -129,9 +195,10 @@ def _role_instructions(role: Role) -> str:
     """
     if role == "customer":
         return (
-            "Audience: end customer. Use clear, concise language. "
-            "Focus on practical information and avoid internal jargon, "
-            "pricing positioning, or competitive talking points."
+            "Audience: end customer (often a first-time visitor). "
+            "Use clear, friendly, practical language; avoid internal jargon and hard sell. "
+            "Sound like helpful product support who naturally knows the offering — not someone "
+            "quoting or summarising documents aloud."
         )
     if role == "internal":
         return (
@@ -145,6 +212,13 @@ def _role_instructions(role: Role) -> str:
             "Audience: internal sales team. You may highlight positioning, "
             "differentiation, and customer-facing value, but still ground "
             "every claim in the provided context."
+        )
+    if role == "partners":
+        return (
+            "Audience: partners (e.g. integrators, resellers, service providers). "
+            "Use clear professional language suited to enablement and joint delivery. "
+            "Emphasise integration touchpoints, shared value, and what end customers gain, "
+            "but still ground every claim in the provided context."
         )
     return "Audience: general."
 
@@ -190,6 +264,7 @@ def _load_chat_model() -> Any:
         if _llm is not None:
             return _llm
 
+        _prepare_windows_llama_dlls()
         from llama_cpp import Llama
 
         model_path = _resolve_chat_model_path()
@@ -203,6 +278,8 @@ def _load_chat_model() -> Any:
         _llm = Llama(
             model_path=str(model_path),
             n_ctx=config.LLM_CONTEXT_TOKENS,
+            n_batch=config.LLM_BATCH_TOKENS,
+            n_ubatch=config.LLM_UBATCH_TOKENS,
             n_threads=config.LLM_CPU_THREADS,
             n_gpu_layers=0,
             verbose=False,
@@ -257,13 +334,26 @@ def _compose_user_message(
     """
     context = "\n\n---\n\n".join(context_blocks) if context_blocks else "(no context provided)"
     role_line = _role_instructions(role)
+    if role == "customer":
+        context_header = (
+            "Reference details for your reply (use only for factual accuracy; "
+            "answer in plain conversational language and do not mention notes, "
+            "files, documents, or pasted text):"
+        )
+    else:
+        context_header = "Context (use this to answer the question above):"
     return f"""{role_line}
 
 Question:
 {query}
 
-Context (use this to answer the question above):
-{context}"""
+{context_header}
+{context}
+
+Answer instructions:
+- Answer directly in 2-4 complete sentences.
+- Prefer one concise paragraph. Use bullets only if the question asks for a list.
+- Do not include unrelated product details just because they appear in the context."""
 
 
 # Kept under their old names so existing tests keep passing. These are pure
@@ -282,7 +372,7 @@ def _build_prompt(
     duplicating the rule copy.
     """
     user_message = _compose_user_message(query, context_blocks, role)
-    return f"{_SYSTEM_PROMPT}\n\n{user_message}\n\nAnswer:"
+    return f"{_system_prompt_for_role(role)}\n\n{user_message}\n\nAnswer:"
 
 
 def generate_answer(
@@ -307,7 +397,7 @@ def generate_answer(
     try:
         response = llm.create_chat_completion(
             messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "system", "content": _system_prompt_for_role(role)},
                 {"role": "user", "content": user_message},
             ],
             max_tokens=config.LLM_MAX_NEW_TOKENS,
@@ -326,14 +416,18 @@ def generate_answer(
             "llm_error",
         )
 
-    answer = response["choices"][0]["message"]["content"].strip()
+    choice = response["choices"][0]
+    answer = _clean_answer(
+        choice["message"]["content"],
+        was_truncated=choice.get("finish_reason") == "length",
+    )
 
     # Safety net: even with strong prompt rules, the model will occasionally
     # fabricate placeholder-looking figures when the context doesn't contain
     # a requested number. Replacing such answers with an honest fallback is
     # worth more for user trust than the rare false positive.
     if _looks_like_fabricated_answer(answer):
-        return _fabrication_fallback(), "fabrication_guard"
+        return _fabrication_fallback(role), "fabrication_guard"
 
     return answer, "huggingface_local"
 
@@ -363,7 +457,7 @@ def generate_answer_streaming(
     try:
         stream = llm.create_chat_completion(
             messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "system", "content": _system_prompt_for_role(role)},
                 {"role": "user", "content": user_message},
             ],
             max_tokens=config.LLM_MAX_NEW_TOKENS,

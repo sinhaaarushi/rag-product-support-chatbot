@@ -24,14 +24,24 @@ def test_role_instructions_distinct_across_audiences():
     customer = _role_instructions("customer")
     internal = _role_instructions("internal")
     sales = _role_instructions("sales")
+    partners = _role_instructions("partners")
 
-    assert customer != sales
-    assert customer != internal
-    assert internal != sales
+    assert len({customer, internal, sales, partners}) == 4
 
     assert "customer" in customer.lower()
     assert "internal" in internal.lower()
     assert "sales" in sales.lower()
+    assert "partner" in partners.lower()
+
+
+def test_customer_prompt_adds_natural_voice_rules():
+    """End customers must get extra system rules so answers do not sound RAG-meta."""
+    customer = _build_prompt(query="x", context_blocks=["y"], role="customer")
+    assert "Customer-facing delivery" in customer
+    assert "Reference details for your reply" in customer
+    internal = _build_prompt(query="x", context_blocks=["y"], role="internal")
+    assert "Customer-facing delivery" not in internal
+    assert "Context (use this to answer the question above):" in internal
 
 
 def test_prompt_includes_query_and_context():

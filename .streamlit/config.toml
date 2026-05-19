@@ -27,6 +27,12 @@ maxUploadSize = 200
 # Chrome with an unexpected profile in a shared machine setup.
 headless = true
 
+# The local watcher walks imported packages and triggers noisy optional
+# transformers vision imports (torchvision is not needed for this text-only
+# app). Disabling it keeps the terminal clean and avoids false "problem"
+# signals during demos.
+fileWatcherType = "none"
+
 # Serve files in ./static/ at /app/static/<path>. We use this to expose the
 # source PDFs via HTTP so the citation chips in the chat can link to them
 # directly -- a file:// link would be blocked by the browser from an http://

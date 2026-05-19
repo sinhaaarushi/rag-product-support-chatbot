@@ -41,7 +41,7 @@ def main() -> int:
     parser.add_argument("query", help="The question to ask.")
     parser.add_argument(
         "--role",
-        choices=["customer", "internal", "sales"],
+        choices=["customer", "internal", "sales", "partners"],
         default="customer",
     )
     parser.add_argument("--top", type=int, default=5, help="Number of source rows to print.")

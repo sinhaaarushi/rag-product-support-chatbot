@@ -25,7 +25,7 @@ except ImportError:
 # Name the UI uses when introducing itself ("Hello, my name's <X>..."). Change
 # the default here or set ASSISTANT_NAME in the environment to rebrand without
 # touching dashboard code. Keep it short -- it sits inside a chat bubble.
-ASSISTANT_NAME: str = os.getenv("ASSISTANT_NAME", "Yntraa")
+ASSISTANT_NAME: str = os.getenv("ASSISTANT_NAME", "Mitraa")
 
 # Support contact shown in the out-of-scope fallback. Override via env var or
 # edit the default here -- it's intentionally kept in one place so the real
@@ -49,6 +49,15 @@ FAISS_METADATA_FILE: Path = VECTOR_STORE_DIR / "metadata.json"
 BACKUP_DIR: Path = PROJECT_ROOT / "Data" / "backups"
 LOGS_DIR: Path = PROJECT_ROOT / "Data" / "logs"
 APP_LOG_FILE: Path = LOGS_DIR / "rag_app.log"
+# Append-only JSONL of every user question (all roles), for operator review.
+# Gitignored with Data/logs/.
+USER_QUESTIONS_LOG: Path = LOGS_DIR / "user_questions.jsonl"
+USER_QUESTIONS_PANEL_MAX: int = int(os.getenv("USER_QUESTIONS_PANEL_MAX", "2500"))
+# Append-only JSONL of answer ratings. Only surfaced in the Internal dashboard panel.
+ANSWER_FEEDBACK_LOG: Path = LOGS_DIR / "answer_feedback.jsonl"
+ANSWER_FEEDBACK_PANEL_MAX: int = int(os.getenv("ANSWER_FEEDBACK_PANEL_MAX", "2500"))
+# Suggested starter chips rank from USER_QUESTIONS_LOG (see Utils.question_history).
+SUGGESTED_PROMPTS_TOP_K: int = int(os.getenv("SUGGESTED_PROMPTS_TOP_K", "4"))
 
 # --- Embeddings (sentence-transformers) ---
 EMBEDDING_MODEL_NAME: str = os.getenv(
@@ -128,16 +137,25 @@ LLM_CONTEXT_TOKENS: int = int(os.getenv("LLM_CONTEXT_TOKENS", "4096"))
 # in practice matching *physical* core count (not logical) gives the best
 # throughput because hyperthreads fight for the same AVX units.
 LLM_CPU_THREADS: int = int(os.getenv("LLM_CPU_THREADS", "0"))
+# Smaller llama.cpp prompt-eval batches are a little more conservative but
+# avoid native CPU backend asserts seen on some Windows builds.
+LLM_BATCH_TOKENS: int = int(os.getenv("LLM_BATCH_TOKENS", "128"))
+LLM_UBATCH_TOKENS: int = int(os.getenv("LLM_UBATCH_TOKENS", "64"))
 # Output budget. Larger values = more verbose answers + slower inference.
-# 256 is a good default for grounded Q&A; raise only if answers look truncated.
-LLM_MAX_NEW_TOKENS: int = int(os.getenv("LLM_MAX_NEW_TOKENS", "256"))
+# 192 keeps grounded Q&A concise and improves CPU latency; raise only if
+# answers look truncated.
+LLM_MAX_NEW_TOKENS: int = int(os.getenv("LLM_MAX_NEW_TOKENS", "192"))
 # Legacy alias retained for any callers still importing this name.
 LLM_MAX_INPUT_TOKENS: int = LLM_CONTEXT_TOKENS
+# Number of top retrieved chunks sent to the LLM. Retrieval can still return
+# more chunks for citations, but generation is fastest and most stable when
+# the model reads only the strongest few.
+LLM_CONTEXT_TOP_K: int = int(os.getenv("LLM_CONTEXT_TOP_K", "3"))
 # Cap total characters for retrieved excerpts in the LLM user message. The chat
 # template, system prompt, and reply budget also consume n_ctx; overflowing
-# prompts cause llama_decode -1 and empty failures. ~8.5k chars is a safe fit
-# with LLM_CONTEXT_TOKENS=4096 and typical English tokenization.
-LLM_MAX_RETRIEVED_CHARS: int = int(os.getenv("LLM_MAX_RETRIEVED_CHARS", "8500"))
+# prompts can crash llama.cpp on some GGUF builds. ~4.5k chars fits comfortably
+# in a 4K-token context and materially reduces CPU generation time.
+LLM_MAX_RETRIEVED_CHARS: int = int(os.getenv("LLM_MAX_RETRIEVED_CHARS", "4500"))
 
 # Default folder for uploaded PDFs (relative to project root)
 DOCUMENTS_DIR: Path = PROJECT_ROOT / "Data" / "documents"

@@ -1,8 +1,10 @@
 """Single-surface chatbot dashboard for the PSS knowledge assistant.
 
 One page, one job: the assistant introduces itself by name, asks the user
-which role best describes them (Customer or Internal Sales Team), then
-answers questions grounded in the indexed PDFs. Each answer is followed by
+which role best describes them (Customer, Internal, Sales, or Partners), then
+answers questions grounded in the indexed PDFs. Internal audience also gets a
+right-hand **Questions asked** tab backed by a local JSONL log: it lists **every audience’s**
+questions (Customer, Internal, Sales, Partners — and CLI), but **only Internal** users see that tab. Each answer is followed by
 one small source chip per unique document citation -- filename + page only,
 no paragraph re-cite.
 
@@ -29,9 +31,22 @@ from html import escape  # noqa: E402
 from typing import Any  # noqa: E402
 
 import streamlit as st  # noqa: E402
+from streamlit.components.v1 import html as components_html  # noqa: E402
 
 import config  # noqa: E402
 from App.app import query_documents  # noqa: E402
+from Utils.feedback_history import (  # noqa: E402
+    answer_feedback_log_path_for_caption,
+    append_answer_feedback,
+    load_answer_feedback_newest_first,
+)
+from Utils.question_history import (  # noqa: E402
+    format_ts_short,
+    load_user_questions_newest_first,
+    question_normalization_key,
+    top_questions_by_frequency,
+    user_questions_log_path_for_caption,
+)
 
 # Cap so a burst of submits cannot enqueue unbounded work in one session.
 _QUERY_QUEUE_MAX = 25
@@ -51,10 +66,8 @@ def _enqueue_user_queries(*parts: str | None) -> None:
         q.append(s)
 
 
-def _schedule_queue_ack_or_rerun() -> None:
-    """After an answer, pause before the next queued question so the user can cancel."""
-    if st.session_state._query_queue:
-        st.session_state._queue_prompt_ack_needed = True
+def _schedule_next_queued_question() -> None:
+    """After an answer, rerun once so the next FIFO question can start."""
     st.rerun()
 
 
@@ -65,60 +78,90 @@ def _truncate_queue_text(text: str, max_len: int = 160) -> str:
     return collapsed[: max_len - 1] + "…"
 
 
-def _render_pending_queue_strip(queued_snap: list[str]) -> None:
-    """Show FIFO questions waiting above the chat input (after enqueue; before dequeue)."""
-    if not queued_snap or st.session_state.role is None:
-        return
-    n = len(queued_snap)
-    head_label = "In queue" if n > 1 else "Next question"
-    parts: list[str] = [
-        f'<div class="pending-queue-strip" role="status" aria-label="Queued questions">'
-        f'<div class="pq-head">{escape(head_label)} · {n} total</div>'
-    ]
-    limit = min(n, 8)
-    for i in range(limit):
-        line = escape(_truncate_queue_text(queued_snap[i]))
-        parts.append(f'<div class="pq-row"><span class="pq-idx">{i + 1}.</span>{line}</div>')
-    if n > 8:
-        parts.append(
-            f'<div class="pq-row"><span class="pq-idx"></span>+ {n - 8} more in line</div>'
-        )
-    parts.append("</div>")
-    st.markdown("".join(parts), unsafe_allow_html=True)
+def _remove_queued_question(index: int) -> None:
+    """Drop one waiting question without touching the answer currently running."""
+    if 0 <= index < len(st.session_state._query_queue):
+        st.session_state._query_queue.pop(index)
 
 
-def _render_queue_continuation_gate() -> None:
-    """Between turns: let the user continue to the next queued question or ✕ cancel all.
+def _clear_queued_questions() -> None:
+    """Clear only waiting questions; the current blocking answer will finish."""
+    st.session_state._query_queue.clear()
 
-    Streamlit cannot interrupt a running ``query_documents`` call; cancelling only
-    applies to questions not yet sent.
-    """
-    if not st.session_state.get("_queue_prompt_ack_needed"):
+
+def _promote_next_queued_question() -> str | None:
+    """Move one queued prompt into the active slot; leave the rest visible."""
+    if st.session_state._active_query:
+        return str(st.session_state._active_query)
+    if not st.session_state._query_queue:
+        return None
+    active_query = st.session_state._query_queue.pop(0)
+    st.session_state._active_query = active_query
+    st.session_state.messages.append({"role": "user", "content": active_query})
+    return str(active_query)
+
+
+def _finish_active_query() -> None:
+    st.session_state._active_query = None
+
+
+def _render_pending_queue_strip() -> None:
+    """Show active + waiting questions above the chat input with queue controls."""
+    active_query = st.session_state.get("_active_query")
+    queued_questions = list(st.session_state._query_queue)
+    if (not active_query and not queued_questions) or st.session_state.role is None:
         return
-    q: list[str] = st.session_state._query_queue
-    if not q:
-        st.session_state._queue_prompt_ack_needed = False
-        return
-    st.info(
-        f"**{len(q)} question(s)** in queue. Continue to answer the next, or cancel everything "
-        "you have not sent yet."
+    waiting_count = len(queued_questions)
+    total_count = waiting_count + (1 if active_query else 0)
+    st.markdown(
+        '<div class="pending-queue-strip" role="status" aria-label="Question queue">'
+        f'<div class="pq-head">Queue · {total_count} total'
+        f' · {waiting_count} waiting</div>',
+        unsafe_allow_html=True,
     )
-    for i, text in enumerate(q[:5]):
-        preview = text if len(text) <= 120 else text[:117] + "…"
-        st.caption(f"{i + 1}. {preview}")
-    if len(q) > 5:
-        st.caption(f"…and {len(q) - 5} more.")
-    c1, c2 = st.columns(2)
-    with c1:
-        if st.button("Continue — answer next", type="primary", key="queue_continue_btn"):
-            st.session_state._queue_prompt_ack_needed = False
-            st.rerun()
-    with c2:
-        if st.button("✕ Cancel all queued", type="secondary", key="queue_cancel_btn"):
-            st.session_state._query_queue.clear()
-            st.session_state._queue_prompt_ack_needed = False
-            st.rerun()
-    st.stop()
+
+    if active_query:
+        active_line = escape(_truncate_queue_text(str(active_query)))
+        st.markdown(
+            '<div class="pq-row pq-row--active">'
+            '<span class="pq-state">Answering now</span>'
+            f"{active_line}</div>",
+            unsafe_allow_html=True,
+        )
+
+    limit = min(waiting_count, 8)
+    for i in range(limit):
+        line = escape(_truncate_queue_text(queued_questions[i]))
+        row, action = st.columns([0.86, 0.14], gap="small")
+        with row:
+            st.markdown(
+                '<div class="pq-row">'
+                f'<span class="pq-state">Queued {i + 1}</span>{line}</div>',
+                unsafe_allow_html=True,
+            )
+        with action:
+            st.button(
+                "Delete",
+                key=f"queue_delete_{i}_{question_normalization_key(queued_questions[i])}",
+                help="Remove this waiting question from the queue.",
+                on_click=_remove_queued_question,
+                args=(i,),
+                use_container_width=True,
+            )
+    if waiting_count > 8:
+        st.markdown(
+            f'<div class="pq-row"><span class="pq-state"></span>+ {waiting_count - 8} more in line</div>',
+            unsafe_allow_html=True,
+        )
+    if waiting_count:
+        st.button(
+            "Stop queued questions",
+            key="queue_clear_all_inline",
+            help="Remove every question waiting after the current answer.",
+            on_click=_clear_queued_questions,
+            use_container_width=True,
+        )
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +176,7 @@ st.set_page_config(
     # to keep lines readable (~75-90 chars) even on a 1440p+ display.
     layout="wide",
     # Sidebar hosts the persistent role switcher (Customer / Internal /
-    # Sales Team). Expanding by default on wide screens makes the active
+    # Sales Team / Partners). Expanding by default on wide screens makes the active
     # audience visible at a glance and lets the user switch mid-chat
     # without hunting through a menu.
     initial_sidebar_state="expanded",
@@ -142,6 +185,8 @@ st.set_page_config(
 # Logo is optional. Drop a PNG at Data/assets/logo.png and it appears as a
 # faded watermark behind the chat. Missing file = no watermark, no error.
 _LOGO_PATH = _PROJECT_ROOT / "Data" / "assets" / "logo.png"
+_YNTRAA_LOGO_PATH = _PROJECT_ROOT / "Data" / "assets" / "yntraa_logo.png"
+_MITRAA_LOGO_PATH = _PROJECT_ROOT / "Data" / "assets" / "mitraa_logo.png"
 # Optional PNG for the main header chip (mascot / icon). If missing, a default
 # SVG is shown. Independent of ``logo.png`` (sidebar wordmark + watermark).
 _HEADER_ICON_PATH = _PROJECT_ROOT / "Data" / "assets" / "header_icon.png"
@@ -158,6 +203,8 @@ def _read_png_b64(path: Path) -> str | None:
 
 
 _LOGO_B64 = _read_png_b64(_LOGO_PATH)
+_YNTRAA_LOGO_B64 = _read_png_b64(_YNTRAA_LOGO_PATH) or _LOGO_B64
+_MITRAA_LOGO_B64 = _read_png_b64(_MITRAA_LOGO_PATH)
 _HEADER_ICON_B64 = _read_png_b64(_HEADER_ICON_PATH)
 # Default cute mascot (SVG) when no ``header_icon.png`` is on disk — override by adding the PNG.
 _CUTE_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48">\
@@ -184,6 +231,28 @@ def _brand_logo_img_src() -> str | None:
     return f"data:image/png;base64,{_LOGO_B64}"
 
 
+def _brand_pair_logo_html(assistant: str) -> str | None:
+    """Sidebar co-branding: Yntraa on the left, Mitraa on the right."""
+    if not _YNTRAA_LOGO_B64 and not _MITRAA_LOGO_B64:
+        return None
+    safe = escape(assistant)
+    parts = ['<div class="sidebar-logo-pair" aria-label="Yntraa Cloud and Mitraa logos">']
+    if _YNTRAA_LOGO_B64:
+        parts.append(
+            '<div class="sidebar-logo-card sidebar-logo-card--yntraa">'
+            f'<img src="data:image/png;base64,{_YNTRAA_LOGO_B64}" alt="Yntraa Cloud" />'
+            "</div>"
+        )
+    if _MITRAA_LOGO_B64:
+        parts.append(
+            '<div class="sidebar-logo-card sidebar-logo-card--mitraa">'
+            f'<img src="data:image/png;base64,{_MITRAA_LOGO_B64}" alt="{safe}" />'
+            "</div>"
+        )
+    parts.append("</div>")
+    return "".join(parts)
+
+
 def _header_icon_img_src() -> str:
     """Data-URL: ``header_icon.png`` if present, else the built-in SVG mascot."""
     if _HEADER_ICON_B64:
@@ -205,16 +274,14 @@ def _app_header_block_html(assistant: str, subtitle: str) -> str:
 
 
 def _sidebar_top_block_html(assistant: str) -> str:
-    """Sidebar top: wordmark image above the name when ``logo.png`` is present."""
-    src = _brand_logo_img_src()
+    """Sidebar top: co-branding above the assistant name when logos are present."""
+    logo_pair = _brand_pair_logo_html(assistant)
     safe = escape(assistant)
-    if src:
+    if logo_pair:
         return f"""
             <div class="sidebar-top">
                 <div class="sidebar-brand sidebar-brand--wordmark">
-                    <div class="sidebar-wordmark">
-                        <img src="{src}" alt="{safe}" />
-                    </div>
+                    {logo_pair}
                     <div>
                         <div class="name">{safe}</div>
                         <div class="tag">Knowledge Assistant</div>
@@ -511,11 +578,16 @@ st.markdown(
         font-size: 0.9rem;
         line-height: 1.5;
     }}
-    .hero-card__text strong {{
+    .hero-card__heading {{
         color: #F8FAFC;
         display: block;
         font-size: 0.95rem;
+        font-weight: 700;
         margin-bottom: 0.35rem;
+    }}
+    .hero-card__text strong:not(.hero-card__heading) {{
+        color: #F8FAFC;
+        font-weight: 700;
     }}
     .hero-card__art {{
         flex: 0 0 100px;
@@ -541,10 +613,12 @@ st.markdown(
         max-width: min(720px, 72%);
         border-radius: 16px;
         padding: 0.75rem 1.05rem;
-        margin-bottom: 0.7rem;
+        margin-bottom: 1rem;
         line-height: 1.55;
         box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
         border: none;
+        position: relative;
+        isolation: isolate;
     }}
     /* User bubble: accent gradient, right-aligned. */
     .stChatMessage:has([data-testid="stChatMessageAvatarUser"]) {{
@@ -583,7 +657,7 @@ st.markdown(
         background: linear-gradient(180deg, #0D121C 0%, #0B0F1A 100%);
         border-right: 1px solid rgba(148, 163, 184, 0.08);
         /* Pin the sidebar to a fixed width so its content (brand tile,
-           "Yntraa" label, role cards) never gets squished into a narrow
+           assistant label, role cards) never gets squished into a narrow
            strip where text wraps one character per line. Streamlit
            otherwise lets the user drag the resize handle down to ~20px,
            which turns the brand into a vertical ladder of letters. */
@@ -665,11 +739,41 @@ st.markdown(
     }}
     .sidebar-wordmark img {{
         width: 100%;
-        max-height: 84px;
+        max-height: 128px;
         object-fit: contain;
         object-position: left center;
         display: block;
         filter: drop-shadow(0 2px 8px rgba(0, 0, 0, 0.4));
+    }}
+    .sidebar-logo-pair {{
+        width: 100%;
+        display: grid;
+        grid-template-columns: 0.95fr 1.35fr;
+        align-items: center;
+        gap: 0.75rem;
+    }}
+    .sidebar-logo-card {{
+        min-height: 94px;
+        border-radius: 12px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        overflow: hidden;
+        background: rgba(15, 23, 42, 0.42);
+    }}
+    .sidebar-logo-card--yntraa {{
+        background: #000;
+    }}
+    .sidebar-logo-card--mitraa {{
+        background: rgba(30, 41, 59, 0.75);
+    }}
+    .sidebar-logo-card img {{
+        width: 100%;
+        height: 100%;
+        max-height: 104px;
+        object-fit: contain;
+        display: block;
+        filter: drop-shadow(0 2px 8px rgba(0, 0, 0, 0.38));
     }}
     .sidebar-brand .mark {{
         width: 34px; height: 34px;
@@ -788,7 +892,7 @@ st.markdown(
     }}
 
     /* Inactive role buttons: per-role left accent. Expects: sidebar markdown,
-       then three ``stButton`` blocks as children 2--4 of the vertical block. */
+       then four ``stButton`` blocks as children 2--5 of the vertical block. */
     [data-testid="stSidebar"] [data-testid="stVerticalBlock"] > div:nth-child(2) .stButton > button[kind="secondary"] {{
         border-left: 3px solid #22D3EE !important;
     }}
@@ -797,6 +901,9 @@ st.markdown(
     }}
     [data-testid="stSidebar"] [data-testid="stVerticalBlock"] > div:nth-child(4) .stButton > button[kind="secondary"] {{
         border-left: 3px solid #FB923C !important;
+    }}
+    [data-testid="stSidebar"] [data-testid="stVerticalBlock"] > div:nth-child(5) .stButton > button[kind="secondary"] {{
+        border-left: 3px solid #34D399 !important;
     }}
 
     .sidebar-footnote {{
@@ -902,16 +1009,6 @@ st.markdown(
         flex: 1 1 auto;
         min-width: 0;
         line-height: 1;
-    }}
-
-    /* New messages slide in from below rather than popping. Small motion
-       but it makes the chat feel responsive instead of abrupt. */
-    @keyframes fadeSlideIn {{
-        from {{ opacity: 0; transform: translateY(8px); }}
-        to {{ opacity: 1; transform: translateY(0); }}
-    }}
-    [data-testid="stChatMessage"] {{
-        animation: fadeSlideIn 0.28s ease-out both;
     }}
 
     /* Logo tile breathes -- a subtle pulsing outer glow that signals the
@@ -1063,6 +1160,42 @@ st.markdown(
         background: rgba(100, 116, 139, 0.12);
         border: 1px solid rgba(148, 163, 184, 0.22);
     }}
+    .answer-feedback-label {{
+        color: #94A3B8;
+        font-size: 0.7rem;
+        font-weight: 600;
+        margin: 0.75rem 0 0.25rem 0.05rem;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+    }}
+    .answer-feedback-empty,
+    .answer-feedback-thanks {{
+        color: #94A3B8;
+        font-size: 0.78rem;
+        padding-top: 0.35rem;
+        white-space: nowrap;
+    }}
+    .answer-feedback-thanks {{
+        color: #FDE68A;
+        font-weight: 600;
+    }}
+    div[data-testid="stChatMessage"] .stButton > button[title^="Rate this answer"] {{
+        min-width: 2.1rem;
+        width: 2.1rem;
+        height: 2.1rem;
+        padding: 0;
+        border-radius: 999px;
+        border: 1px solid rgba(251, 191, 36, 0.35);
+        background: rgba(251, 191, 36, 0.06);
+        color: #FDE68A;
+        font-size: 1.05rem;
+        line-height: 1;
+    }}
+    div[data-testid="stChatMessage"] .stButton > button[title^="Rate this answer"]:hover {{
+        border-color: rgba(251, 191, 36, 0.72);
+        background: rgba(251, 191, 36, 0.13);
+        transform: translateY(-1px);
+    }}
     .followup-block__t {{
         color: #94A3B8;
         font-size: 0.7rem;
@@ -1124,7 +1257,47 @@ st.markdown(
         color: #64748B !important;
     }}
 
-    /* Snapshot of queued questions directly above the chat bar */
+    .internal-qhist-meta {{
+        font-size: 0.72rem;
+        color: #94A3B8;
+        margin-bottom: 0.25rem;
+    }}
+
+    /* Internal role: right-rail question history */
+    [data-testid="column"] .internal-qhist-panel {{
+        max-height: min(70vh, 560px);
+        overflow-y: auto;
+        padding: 0.15rem 0.35rem 0.5rem 0;
+        border: 1px solid rgba(167, 139, 250, 0.25);
+        border-radius: 12px;
+        background: rgba(15, 23, 42, 0.55);
+    }}
+    .internal-qhist-item {{
+        font-size: 0.88rem;
+        line-height: 1.4;
+        color: #E2E8F0;
+        padding: 0.45rem 0.35rem;
+        border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+        word-wrap: break-word;
+    }}
+    .internal-qhist-item:last-child {{
+        border-bottom: none;
+    }}
+    .internal-qhist-n {{
+        color: #A78BFA;
+        font-weight: 600;
+        margin-right: 0.35rem;
+        font-variant-numeric: tabular-nums;
+    }}
+    .internal-feedback-stars {{
+        color: #FDE68A;
+        font-size: 0.86rem;
+        font-weight: 600;
+        margin: 0.1rem 0 0.25rem;
+        letter-spacing: 0.04em;
+    }}
+
+    /* Active answer + queued questions panel above the chat input. */
     .pending-queue-strip {{
         max-width: min(1280px, 95vw);
         margin: 0 auto 10px auto;
@@ -1145,13 +1318,29 @@ st.markdown(
     }}
     .pending-queue-strip .pq-row {{
         margin: 4px 0 0 0;
-        padding-left: 0.35rem;
+        padding: 0.42rem 0.35rem;
         line-height: 1.35;
+        border-bottom: 1px solid rgba(148, 163, 184, 0.08);
     }}
-    .pending-queue-strip .pq-idx {{
+    .pending-queue-strip .pq-row--active {{
+        color: #F8FAFC;
+        background: rgba(34, 211, 238, 0.07);
+        border-radius: 8px;
+        border-bottom: none;
+    }}
+    .pending-queue-strip .pq-state {{
+        display: inline-block;
+        min-width: 98px;
         color: #94A3B8;
-        margin-right: 6px;
+        font-size: 0.72rem;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        margin-right: 8px;
+        text-transform: uppercase;
         font-variant-numeric: tabular-nums;
+    }}
+    .pending-queue-strip .pq-row--active .pq-state {{
+        color: #67E8F9;
     }}
 
     {_WATERMARK_CSS}
@@ -1179,9 +1368,16 @@ if "_query_queue" not in st.session_state:
     # FIFO of user questions when another answer is still being generated;
     # drained one per rerun so nothing is dropped on double-Enter or chip+type.
     st.session_state._query_queue = []
-if "_queue_prompt_ack_needed" not in st.session_state:
-    # When True, we show Continue / Cancel before dequeueing the next queued question.
-    st.session_state._queue_prompt_ack_needed = False
+if "_active_query" not in st.session_state:
+    # The one question currently being answered. Everything else remains visible
+    # in _query_queue until this turn completes.
+    st.session_state._active_query = None
+if "_chat_transcript_snap_count" not in st.session_state:
+    # Tracks message list length across reruns; used to scroll only when turns append.
+    st.session_state._chat_transcript_snap_count = 0
+if "_pending_query_after_role" not in st.session_state:
+    # Suggested prompt chosen before the first audience pick; sent once the role exists.
+    st.session_state._pending_query_after_role = None
 
 
 # ---------------------------------------------------------------------------
@@ -1311,7 +1507,7 @@ def _empty_state_hero_html(assistant: str) -> str:
 <div class="hero-wrap">
   <div class="hero-card hero-card--cyan" role="region" aria-label="About the assistant">
     <div class="hero-card__text">
-      <strong>Hello — I&apos;m {a}.</strong>
+      <strong class="hero-card__heading">Hello — I&apos;m {a}.</strong>
       I can answer questions grounded in your product documentation. Every answer comes
       with the exact source I used.
     </div>
@@ -1319,9 +1515,10 @@ def _empty_state_hero_html(assistant: str) -> str:
   </div>
   <div class="hero-card hero-card--violet" role="region" aria-label="Getting started">
     <div class="hero-card__text">
-      <strong>Pick an audience to begin</strong>
-      Choose <strong>Customer</strong> or <strong>Internal</strong> or <strong>Sales Team</strong>
-      on the left. I&apos;ll match tone and detail to that role — and you can switch any time.
+      <strong class="hero-card__heading">Pick an audience to begin</strong>
+      Choose <strong>Customer</strong>, <strong>Internal</strong>, <strong>Sales Team</strong>,
+      or <strong>Partners</strong> on the left. I&apos;ll match tone and detail to that role — and you
+      can switch any time.
     </div>
     <div class="hero-card__art" aria-hidden="true">{people_svg}</div>
   </div>
@@ -1352,6 +1549,7 @@ _ROLE_LABELS = {
     "customer": "Customer",
     "internal": "Internal",
     "sales": "Sales Team",
+    "partners": "Partners",
 }
 
 
@@ -1426,6 +1624,80 @@ def _render_source_section(sources: list[dict[str, Any]]) -> None:
     st.markdown("".join(parts), unsafe_allow_html=True)
 
 
+def _rating_stars_html(rating: int | None) -> str:
+    """Five-star label with empty stars until feedback is submitted."""
+    filled = max(0, min(5, int(rating or 0)))
+    return "".join("★" if i <= filled else "☆" for i in range(1, 6))
+
+
+def _question_for_feedback_turn(turn_index: int) -> str:
+    """Nearest previous real user message for the answer at ``turn_index``."""
+    for prior in reversed(st.session_state.messages[:turn_index]):
+        if prior.get("role") == "user":
+            content = str(prior.get("content", "")).strip()
+            if content and not content.startswith("*"):
+                return content
+    return ""
+
+
+def _submit_answer_feedback(turn_index: int, rating: int) -> None:
+    """Persist a star rating and update the in-memory turn so stars fill on rerun."""
+    if turn_index < 0 or turn_index >= len(st.session_state.messages):
+        return
+    turn = st.session_state.messages[turn_index]
+    if turn.get("role") != "assistant":
+        return
+    if not turn.get("is_answer"):
+        return
+    previous_rating = turn.get("feedback_rating")
+    if previous_rating == rating:
+        return
+
+    question = _question_for_feedback_turn(turn_index)
+    answer = str(turn.get("content", "")).strip()
+    append_answer_feedback(
+        question=question,
+        answer=answer,
+        role=str(turn.get("audience_role") or st.session_state.role or ""),
+        rating=rating,
+    )
+    turn["feedback_rating"] = rating
+
+
+def _render_answer_feedback(turn: dict[str, Any], turn_index: int) -> None:
+    """Ask for 1-5 feedback after each answer; visible to all audiences."""
+    if turn.get("role") != "assistant" or not turn.get("is_answer"):
+        return
+    rating = turn.get("feedback_rating")
+    current_rating = int(rating) if isinstance(rating, int) else None
+    st.markdown(
+        '<div class="answer-feedback-label">Rate this answer</div>',
+        unsafe_allow_html=True,
+    )
+    star_cols = st.columns([0.28, 0.28, 0.28, 0.28, 0.28, 1.6], gap="small")
+    for rating_value in range(1, 6):
+        label = "★" if current_rating and rating_value <= current_rating else "☆"
+        with star_cols[rating_value - 1]:
+            st.button(
+                label,
+                key=f"answer_feedback_{turn_index}_{rating_value}",
+                help=f"Rate this answer {rating_value} out of 5",
+                on_click=_submit_answer_feedback,
+                args=(turn_index, rating_value),
+            )
+    with star_cols[-1]:
+        if current_rating:
+            st.markdown(
+                f'<div class="answer-feedback-thanks">Thanks — {_rating_stars_html(current_rating)}</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                '<div class="answer-feedback-empty">No feedback yet</div>',
+                unsafe_allow_html=True,
+            )
+
+
 def _render_assistant_extras(turn: dict[str, Any], turn_index: int) -> None:
     """After the answer body: defensible source-match badge, reasoning expander, sources, follow-ups."""
     sm = turn.get("source_match")
@@ -1459,6 +1731,7 @@ def _render_assistant_extras(turn: dict[str, Any], turn_index: int) -> None:
                 ):
                     st.session_state._pending_query = p
                     st.rerun()
+    _render_answer_feedback(turn, turn_index)
 
 
 # ---------------------------------------------------------------------------
@@ -1472,6 +1745,12 @@ _ROLE_OPTIONS: list[tuple[str, str, str, str]] = [
     ("customer", "👤", "Customer", "External user — plain-language answers, no internal jargon."),
     ("internal", "🛠", "Internal", "Support / engineering / ops — technical detail welcome."),
     ("sales", "💼", "Sales Team", "Positioning, differentiators, and plan fit."),
+    (
+        "partners",
+        "🤝",
+        "Partners",
+        "Integrators & allies — joint value, enablement, and customer outcomes, grounded in docs.",
+    ),
 ]
 
 
@@ -1490,9 +1769,14 @@ def _seed_initial_role(picked_role: str) -> None:
         {
             "role": "assistant",
             "content": (
-                f"Great — I'll answer with the **{label}** audience in mind. "
-                "Ask me anything about the product documentation and I'll pull "
-                "the relevant facts with source citations."
+                f"Great — I'll keep things clear and practical as your **{label}** contact. "
+                "Ask me anything about the products and services; I'm here to help."
+                if picked_role == "customer"
+                else (
+                    f"Great — I'll answer with the **{label}** audience in mind. "
+                    "Ask me anything about the product documentation and I'll pull "
+                    "the relevant facts with source citations."
+                )
             ),
         }
     )
@@ -1516,6 +1800,10 @@ def _switch_role(picked_role: str) -> None:
 
     if is_first_pick:
         _seed_initial_role(picked_role)
+        deferred_prompt = st.session_state.get("_pending_query_after_role")
+        if deferred_prompt:
+            st.session_state._pending_query = deferred_prompt
+            st.session_state._pending_query_after_role = None
     else:
         label = _ROLE_LABELS.get(picked_role, picked_role)
         st.session_state.messages.append(
@@ -1579,38 +1867,79 @@ def _render_initial_greeting() -> None:
 
 # ---------------------------------------------------------------------------
 # Suggested prompts -- shown once the role is picked and before the first
-# real user question. Gives demo watchers an obvious starting point and
-# doubles as visual proof that the bot is ready.
+# real user question. Primary list is ranked from ``user_questions.jsonl`` (all
+# audiences). Fallbacks stay grounded in what the PSS corpus covers so a cold
+# deploy still has sane chips.
 # ---------------------------------------------------------------------------
 
-# Keep these grounded in what the PSS corpus actually covers. A suggested
-# prompt the bot can't answer is worse than none at all -- it makes the
-# first demo interaction a fallback message.
-_SUGGESTED_PROMPTS = [
+_FALLBACK_SUGGESTED_PROMPTS: list[str] = [
     "What is vDaaS and who is it for?",
     "What plans are available?",
     "How is data secured?",
     "What's the SLA commitment?",
 ]
 
+_SUGGEST_CHIP_LABEL_MAX = 96
 
-def _render_suggested_prompts() -> None:
-    """Render a row of one-click example questions.
 
-    Clicking a chip stores the prompt in ``st.session_state._pending_query``
-    and reruns; the main loop picks it up on the next frame and sends it
-    through the normal query path. This routes suggested prompts through
-    the exact same code the chat input uses, so there's no risk of the
-    two paths drifting apart in how they render retrieval errors, sources,
-    fabrication fallbacks, etc.
+def _suggest_chip_label(full_text: str, max_chars: int = _SUGGEST_CHIP_LABEL_MAX) -> str:
+    """Chip text: single line, ellipsis when the logged question is very long."""
+    collapsed = " ".join(full_text.split())
+    if len(collapsed) <= max_chars:
+        return collapsed
+    return collapsed[: max_chars - 1].rstrip() + "…"
+
+
+def _suggested_prompt_chip_texts() -> list[str]:
+    """Top questions from the frequency table, padded with corpus fallbacks."""
+    want = max(1, int(config.SUGGESTED_PROMPTS_TOP_K))
+    ranked = top_questions_by_frequency(top_k=want)
+    if len(ranked) >= want:
+        return ranked[:want]
+
+    seen_norm = {question_normalization_key(t) for t in ranked}
+    out = list(ranked)
+    for fallback in _FALLBACK_SUGGESTED_PROMPTS:
+        if len(out) >= want:
+            break
+        nk = question_normalization_key(fallback)
+        if nk in seen_norm:
+            continue
+        out.append(fallback)
+        seen_norm.add(nk)
+    return out
+
+
+def _render_suggested_prompts(*, defer_until_role: bool = False) -> None:
+    """Render a row of one-click questions (log-backed with safe fallbacks).
+
+    When a role already exists, clicking a chip stores the prompt in
+    ``st.session_state._pending_query`` and reruns; the main loop sends it
+    through the normal query path. Before the first role pick, we hold the
+    selected prompt and send it only after the audience is known.
     """
-    st.markdown('<div class="suggest-label">Try asking</div>', unsafe_allow_html=True)
+    chips = _suggested_prompt_chip_texts()
+    if not chips:
+        return
+    st.markdown('<div class="suggest-label">Most asked</div>', unsafe_allow_html=True)
+    if defer_until_role and st.session_state.get("_pending_query_after_role"):
+        st.caption("Question selected. Pick an audience on the left and I'll answer it.")
     st.markdown('<div class="suggest-row">', unsafe_allow_html=True)
-    columns = st.columns(len(_SUGGESTED_PROMPTS), gap="small")
-    for column, prompt in zip(columns, _SUGGESTED_PROMPTS, strict=True):
+    columns = st.columns(len(chips), gap="small")
+    for idx, (column, prompt) in enumerate(zip(columns, chips, strict=True)):
+        label = _suggest_chip_label(prompt)
+        tooltip = prompt if label != prompt else None
         with column:
-            if st.button(prompt, key=f"suggest_{prompt}", use_container_width=True):
-                st.session_state._pending_query = prompt
+            if st.button(
+                label,
+                key=f"suggest_chip_{'defer' if defer_until_role else 'ready'}_{idx}",
+                help=tooltip,
+                use_container_width=True,
+            ):
+                if defer_until_role:
+                    st.session_state._pending_query_after_role = prompt
+                else:
+                    st.session_state._pending_query = prompt
                 st.rerun()
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1618,6 +1947,63 @@ def _render_suggested_prompts() -> None:
 # ---------------------------------------------------------------------------
 # Conversation replay
 # ---------------------------------------------------------------------------
+
+
+def _scroll_main_when_transcript_grows() -> None:
+    """Reruns snap scroll position to the top; keep the viewport on the newest turn."""
+    transcript_len = len(st.session_state.messages)
+    prior_snapshot = int(st.session_state.get("_chat_transcript_snap_count", 0))
+
+    if transcript_len < prior_snapshot:
+        # Transcript was cleared or truncated elsewhere.
+        st.session_state._chat_transcript_snap_count = transcript_len
+        return
+
+    if transcript_len > prior_snapshot:
+        components_html(
+            """
+        <script>
+        const doc = window.parent.document;
+        function pickMainScroller() {
+            return (
+                doc.querySelector('section[data-testid="stAppViewContainer"] section.main') ??
+                doc.querySelector('section.main') ??
+                doc.querySelector('[data-testid="stScrollable"]:not(select)')
+            );
+        }
+        function scrollLatestIntoView() {
+            const msgs = doc.querySelectorAll('[data-testid="stChatMessage"]');
+            if (msgs.length) {
+                msgs[msgs.length - 1].scrollIntoView({
+                    behavior: 'auto',
+                    block: 'nearest',
+                    inline: 'nearest',
+                });
+            }
+            const main = pickMainScroller();
+            if (!main) {
+                return;
+            }
+            main.scrollTop = main.scrollHeight;
+            requestAnimationFrame(() => {
+                main.scrollTop = main.scrollHeight;
+            });
+            setTimeout(() => {
+                main.scrollTop = main.scrollHeight;
+            }, 160);
+            setTimeout(() => {
+                main.scrollTop = main.scrollHeight;
+            }, 420);
+        }
+        scrollLatestIntoView();
+        </script>
+        """,
+            height=0,
+            width=0,
+        )
+
+    # Remember length so unrelated reruns do not repeatedly jump the viewport.
+    st.session_state._chat_transcript_snap_count = transcript_len
 
 
 def _replay_history() -> None:
@@ -1636,6 +2022,189 @@ def _replay_history() -> None:
                 _render_assistant_extras(turn, idx)
 
 
+def _role_label_for_history(role_id: str) -> str:
+    """Pretty label for the audience stored with each logged question."""
+    rid = (role_id or "").strip().lower()
+    if not rid:
+        return "—"
+    return _ROLE_LABELS.get(rid, rid.replace("_", " ").title())
+
+
+def _render_internal_questions_history_panel() -> None:
+    """Right column: question and feedback logs; visible only in Internal mode."""
+    tab_questions, tab_feedback = st.tabs(["Questions asked · all roles", "Answer feedback"])
+    with tab_questions:
+        rel = user_questions_log_path_for_caption()
+        st.caption(
+            f"This list is **only shown in Internal** mode. Every question from **Customer, Internal, "
+            f"Sales, Partners** (and CLI runs) is appended to `{rel}` — **newest first**."
+        )
+        rows = load_user_questions_newest_first()
+        if not rows:
+            st.caption("No questions logged yet — they are recorded from this build onward.")
+            return
+        st.markdown(
+            '<div class="internal-qhist-panel" role="region" '
+            'aria-label="All questions from every role">',
+            unsafe_allow_html=True,
+        )
+        for i, rec in enumerate(rows, start=1):
+            q = escape(rec["question"])
+            role_key = (rec.get("role") or "").strip()
+            role_disp = escape(_role_label_for_history(role_key))
+            meta = escape(f"{format_ts_short(rec.get('ts', ''))} · asked as {role_disp}")
+            st.markdown(
+                f'<div class="internal-qhist-item">'
+                f'<div class="internal-qhist-meta"><span class="internal-qhist-n">{i}.</span>{meta}</div>'
+                f"<div>{q}</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with tab_feedback:
+        rel = answer_feedback_log_path_for_caption()
+        st.caption(
+            f"This list is **only shown in Internal** mode. Every 1-5 answer rating is appended "
+            f"to `{rel}` — **newest first**."
+        )
+        rows = load_answer_feedback_newest_first()
+        if not rows:
+            st.caption("No answer feedback yet — ratings appear here after users click a star.")
+            return
+        st.markdown(
+            '<div class="internal-qhist-panel" role="region" '
+            'aria-label="Answer feedback from every role">',
+            unsafe_allow_html=True,
+        )
+        for i, rec in enumerate(rows, start=1):
+            question = escape(_truncate_queue_text(rec["question"], max_len=170))
+            answer = escape(_truncate_queue_text(rec["answer"], max_len=220))
+            role_key = (rec.get("role") or "").strip()
+            role_disp = escape(_role_label_for_history(role_key))
+            rating = int(rec.get("rating", 0))
+            stars = escape(_rating_stars_html(rating))
+            meta = escape(f"{format_ts_short(rec.get('ts', ''))} · rated as {role_disp}")
+            st.markdown(
+                f'<div class="internal-qhist-item">'
+                f'<div class="internal-qhist-meta"><span class="internal-qhist-n">{i}.</span>{meta}</div>'
+                f'<div class="internal-feedback-stars">{stars} <strong>{rating}/5</strong></div>'
+                f"<div><strong>Q:</strong> {question}</div>"
+                f"<div><strong>A:</strong> {answer}</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+        st.markdown("</div>", unsafe_allow_html=True)
+
+
+def _render_main_chat_body() -> None:
+    """Primary column: chat transcript, gates, suggested prompts, input, and query handling."""
+    # ---------------------------------------------------------------------------
+    # Chat input (disabled until a role is picked)
+    # ---------------------------------------------------------------------------
+
+    _pending_queue_banner = st.empty()
+
+    chat_placeholder = (
+        f"Ask {config.ASSISTANT_NAME} anything about the product documentation…"
+        if st.session_state.role
+        else "Pick a role in the sidebar to start chatting"
+    )
+
+    typed_prompt = st.chat_input(chat_placeholder, disabled=st.session_state.role is None)
+
+    # Suggested chip / follow-up buttons set _pending_query and rerun; pop so it fires once.
+    pending_prompt = st.session_state.pop("_pending_query", None)
+    # Typed input and pending chip both enqueue; order is typed first, then pending.
+    _enqueue_user_queries(typed_prompt, pending_prompt)
+    user_prompt = _promote_next_queued_question()
+
+    _replay_history()
+
+    if st.session_state.role is None:
+        _render_initial_greeting()
+        _render_suggested_prompts(defer_until_role=True)
+    elif not any(
+        msg["role"] == "user" and not msg["content"].startswith("*")
+        for msg in st.session_state.messages
+    ):
+        # Role picked, but the user hasn't typed a real question yet (the
+        # seeded "*I'm here as Customer*" messages start with "*" and don't
+        # count). Surfacing suggested prompts here gives demo watchers an
+        # obvious starting point and makes the bot feel pre-loaded.
+        _render_suggested_prompts()
+
+    with _pending_queue_banner.container():
+        _render_pending_queue_strip()
+
+    if user_prompt:
+        with st.chat_message("assistant", avatar="💬"):
+            # Custom typing indicator in place of Streamlit's generic gray
+            # spinner. Using st.empty() so we can overwrite the dots with the
+            # real answer in the same bubble -- no flashing "spinner bubble
+            # disappears / new bubble appears" transition.
+            answer_slot = st.empty()
+            answer_slot.markdown(
+                '<div class="typing-dots">'
+                '<span class="dot"></span>'
+                '<span class="dot"></span>'
+                '<span class="dot"></span>'
+                '<span class="typing-caption">'
+                f"{config.ASSISTANT_NAME} is reading the documentation…"
+                "</span>"
+                "</div>",
+                unsafe_allow_html=True,
+            )
+
+            _q_t0 = time.perf_counter()
+            try:
+                response = query_documents(
+                    query=user_prompt,
+                    role=st.session_state.role,
+                    include_sources=True,
+                )
+            except Exception as exc:
+                # Surface failures in-line and record them in history so
+                # the user can scroll back and see what went wrong.
+                error_message = f"Sorry — I hit an error while answering: {exc}"
+                answer_slot.error(error_message)
+                st.session_state.messages.append(
+                    {"role": "assistant", "content": error_message, "sources": []}
+                )
+                _finish_active_query()
+                if st.session_state._query_queue:
+                    _schedule_next_queued_question()
+            else:
+                _elapsed_s = time.perf_counter() - _q_t0
+                st.session_state._response_time_ms = (
+                    st.session_state.get("_response_time_ms", []) + [_elapsed_s * 1000.0]
+                )[-5:]
+                answer_text = (
+                    response.get("answer", "").strip()
+                    or "I don't have enough information in the documents to answer that confidently."
+                )
+                answer_slot.markdown(answer_text)
+                out_of_scope = bool(response.get("out_of_scope", False))
+                retrieved_sources = [] if out_of_scope else (response.get("sources", []) or [])
+                turn_idx = len(st.session_state.messages)
+                asst_msg: dict[str, Any] = {
+                    "role": "assistant",
+                    "content": answer_text,
+                    "sources": retrieved_sources,
+                    "source_match": response.get("source_match"),
+                    "reasoning_steps": response.get("reasoning_steps") or [],
+                    "follow_ups": response.get("follow_ups") or [],
+                    "out_of_scope": out_of_scope,
+                    "audience_role": st.session_state.role,
+                    "is_answer": True,
+                }
+                _render_assistant_extras(asst_msg, turn_idx)
+                st.session_state.messages.append(asst_msg)
+                _finish_active_query()
+                if st.session_state._query_queue:
+                    _schedule_next_queued_question()
+
+
 # ---------------------------------------------------------------------------
 # Main render
 # ---------------------------------------------------------------------------
@@ -1646,116 +2215,13 @@ def _replay_history() -> None:
 # audience in effect.
 _render_sidebar()
 
-_replay_history()
-
-_render_queue_continuation_gate()
-
-if st.session_state.role is None:
-    _render_initial_greeting()
-elif not any(
-    msg["role"] == "user" and not msg["content"].startswith("*")
-    for msg in st.session_state.messages
-):
-    # Role picked, but the user hasn't typed a real question yet (the
-    # seeded "*I'm here as Customer*" messages start with "*" and don't
-    # count). Surfacing suggested prompts here gives demo watchers an
-    # obvious starting point and makes the bot feel pre-loaded.
-    _render_suggested_prompts()
-
-
-# ---------------------------------------------------------------------------
-# Chat input (disabled until a role is picked)
-# ---------------------------------------------------------------------------
-
-_pending_queue_banner = st.empty()
-
-chat_placeholder = (
-    f"Ask {config.ASSISTANT_NAME} anything about the product documentation…"
-    if st.session_state.role
-    else "Pick a role in the sidebar to start chatting"
-)
-
-typed_prompt = st.chat_input(chat_placeholder, disabled=st.session_state.role is None)
-
-# Suggested chip / follow-up buttons set _pending_query and rerun; pop so it fires once.
-pending_prompt = st.session_state.pop("_pending_query", None)
-# Typed input and pending chip both enqueue; order is typed first, then pending.
-_enqueue_user_queries(typed_prompt, pending_prompt)
-queued_snap = list(st.session_state._query_queue)
-with _pending_queue_banner.container():
-    _render_pending_queue_strip(queued_snap)
-
-user_prompt = st.session_state._query_queue.pop(0) if st.session_state._query_queue else None
-
-if user_prompt:
-    still_queued = len(st.session_state._query_queue)
-    st.session_state.messages.append({"role": "user", "content": user_prompt})
-    with st.chat_message("user", avatar="🧑"):
-        st.markdown(user_prompt)
-        if still_queued:
-            st.caption(
-                f"{still_queued} more question{'s' if still_queued != 1 else ''} "
-                "in line — after this answer you can continue or ✕ cancel before the next runs."
-            )
-
-    with st.chat_message("assistant", avatar="💬"):
-        # Custom typing indicator in place of Streamlit's generic gray
-        # spinner. Using st.empty() so we can overwrite the dots with the
-        # real answer in the same bubble -- no flashing "spinner bubble
-        # disappears / new bubble appears" transition.
-        answer_slot = st.empty()
-        answer_slot.markdown(
-            '<div class="typing-dots">'
-            '<span class="dot"></span>'
-            '<span class="dot"></span>'
-            '<span class="dot"></span>'
-            '<span class="typing-caption">'
-            f"{config.ASSISTANT_NAME} is reading the documentation…"
-            "</span>"
-            "</div>",
-            unsafe_allow_html=True,
-        )
-
-        _q_t0 = time.perf_counter()
-        try:
-            response = query_documents(
-                query=user_prompt,
-                role=st.session_state.role,
-                include_sources=True,
-            )
-        except Exception as exc:
-            # Surface failures in-line and record them in history so
-            # the user can scroll back and see what went wrong.
-            error_message = f"Sorry — I hit an error while answering: {exc}"
-            answer_slot.error(error_message)
-            st.session_state.messages.append(
-                {"role": "assistant", "content": error_message, "sources": []}
-            )
-            if st.session_state._query_queue:
-                _schedule_queue_ack_or_rerun()
-        else:
-            _elapsed_s = time.perf_counter() - _q_t0
-            st.session_state._response_time_ms = (
-                st.session_state.get("_response_time_ms", []) + [_elapsed_s * 1000.0]
-            )[-5:]
-            answer_text = (
-                response.get("answer", "").strip()
-                or "I don't have enough information in the documents to answer that confidently."
-            )
-            answer_slot.markdown(answer_text)
-            out_of_scope = bool(response.get("out_of_scope", False))
-            retrieved_sources = [] if out_of_scope else (response.get("sources", []) or [])
-            turn_idx = len(st.session_state.messages)
-            asst_msg: dict[str, Any] = {
-                "role": "assistant",
-                "content": answer_text,
-                "sources": retrieved_sources,
-                "source_match": response.get("source_match"),
-                "reasoning_steps": response.get("reasoning_steps") or [],
-                "follow_ups": response.get("follow_ups") or [],
-                "out_of_scope": out_of_scope,
-            }
-            _render_assistant_extras(asst_msg, turn_idx)
-            st.session_state.messages.append(asst_msg)
-            if st.session_state._query_queue:
-                _schedule_queue_ack_or_rerun()
+if st.session_state.role == "internal":
+    _chat_col, _hist_col = st.columns([2.4, 1], gap="large")
+    with _hist_col:
+        _render_internal_questions_history_panel()
+    with _chat_col:
+        _render_main_chat_body()
+    _scroll_main_when_transcript_grows()
+else:
+    _render_main_chat_body()
+    _scroll_main_when_transcript_grows()

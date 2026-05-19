@@ -11,3 +11,5 @@ faiss-cpu>=1.8.0,<2.0
 # index so pip fetches a prebuilt binary instead of compiling from source:
 #   pip install --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu llama-cpp-python
 llama-cpp-python>=0.3.0,<0.4
+# Provides vcruntime/vcomp DLLs used by llama-cpp-python CPU wheels on Windows.
+msvc-runtime>=14.0; platform_system == "Windows"

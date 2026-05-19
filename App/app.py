@@ -26,6 +26,19 @@ from VectorStore.faiss_store import (
 logger = get_logger("app")
 
 
+def _record_asked_question(query: str, role: str) -> None:
+    """Best-effort append to the local question log; never raises."""
+    q = (query or "").strip()
+    if not q or len(q) > config.MAX_QUERY_CHARS:
+        return
+    try:
+        from Utils.question_history import append_user_question
+
+        append_user_question(q, role)
+    except Exception as exc:
+        logger.warning("user question log failed: %s", exc)
+
+
 def _resolve_path(file_path: str | Path) -> Path:
     p = Path(file_path)
     if not p.is_absolute():
@@ -233,7 +246,7 @@ def _heuristic_follow_ups(sources: list[dict]) -> list[str]:
 
 def query_documents(
     query: str,
-    role: Literal["customer", "internal", "sales"] = "customer",
+    role: Literal["customer", "internal", "sales", "partners"] = "customer",
     include_sources: bool = False,
 ) -> dict:
     """Run retrieval + LLM answer for one query and return the response payload.
@@ -255,6 +268,7 @@ def query_documents(
     The ``out_of_scope`` flag lets the UI suppress source chips and any
     "grounded in docs" affordances when the bot is punting.
     """
+    _record_asked_question(query, role)
     retrieved_chunks = retrieve_for_query(query)
 
     # The raw (unboosted) score is the truer signal of semantic relevance --
@@ -285,7 +299,8 @@ def query_documents(
             response["sources"] = []
         return response
 
-    context_texts = [c.text for c in retrieved_chunks if c.text.strip()]
+    llm_context_chunks = retrieved_chunks[: config.LLM_CONTEXT_TOP_K]
+    context_texts = [c.text for c in llm_context_chunks if c.text.strip()]
     answer, backend = generate_answer(query, context_texts, role=role)
 
     src_dicts = chunks_to_context_dicts(retrieved_chunks)
@@ -312,7 +327,7 @@ def query_documents(
 
 def query_documents_streaming(
     query: str,
-    role: Literal["customer", "internal", "sales"] = "customer",
+    role: Literal["customer", "internal", "sales", "partners"] = "customer",
 ) -> tuple[dict, Iterator[str]]:
     """Streaming variant of ``query_documents``.
 
@@ -329,6 +344,7 @@ def query_documents_streaming(
       iterate, concatenate the result, render the sources". That keeps
       the dashboard code free of special-casing for the fast path.
     """
+    _record_asked_question(query, role)
     retrieved_chunks = retrieve_for_query(query)
     top_raw_score = max((c.score for c in retrieved_chunks), default=0.0)
 
@@ -357,7 +373,8 @@ def query_documents_streaming(
 
         return metadata, _fallback_stream()
 
-    context_texts = [c.text for c in retrieved_chunks if c.text.strip()]
+    llm_context_chunks = retrieved_chunks[: config.LLM_CONTEXT_TOP_K]
+    context_texts = [c.text for c in llm_context_chunks if c.text.strip()]
     sources = chunks_to_context_dicts(retrieved_chunks)
     metadata = {
         "role": role,
@@ -387,4 +404,4 @@ def backup_vector_store() -> str:
 
 def restore_vector_store(zip_path: str | Path) -> None:
     restore_vector_store_backup(zip_path)
-    logger.info("backup restored from=%s", zip_path)
+    logger.info("backup restored from=%s", zip_path) # here i included zip path to see the path of the file and see if it is working or not

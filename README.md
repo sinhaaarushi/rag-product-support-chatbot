@@ -14,7 +14,7 @@ Pipeline:
 4. Store vectors + metadata in FAISS + local metadata JSON
 5. Embed query and perform similarity search
 6. Re-rank with document weightage (PSS priority)
-7. Build grounded prompt + role adaptation (`customer` / `sales`)
+7. Build grounded prompt + role adaptation (`customer` / `internal` / `sales` / `partners`)
 8. Return final answer
 
 ## Project Structure
