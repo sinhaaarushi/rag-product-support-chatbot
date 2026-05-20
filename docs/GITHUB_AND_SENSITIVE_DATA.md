@@ -17,14 +17,6 @@ This shows you are **actively building** a real system without exposing customer
 - **Backups** → `Data/backups/` (ignored).
 - **Secrets** → `.env` (ignored); use `.env.example` only as a template.
 
-## How commits still look “real” and professional
-
-Use clear, scoped commits, for example:
-
-- `feat: add FAISS vector store with persisted metadata`
-- `test: add retriever weighting and FAISS roundtrip tests`
-- `docs: add production checklist and architecture diagram`
-- `chore: tighten gitignore for sensitive Data paths`
 
 Avoid committing large binaries; if you need assets, use **Git LFS** only for non-sensitive files or host artifacts internally.
 
